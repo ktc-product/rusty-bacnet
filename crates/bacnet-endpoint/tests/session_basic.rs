@@ -126,6 +126,55 @@ async fn both_roles_round_trip() {
     session_b.stop().await.unwrap();
 }
 
+/// An object added through the shared database after start answers a peer's read.
+#[tokio::test]
+async fn an_object_added_through_the_shared_database_is_served() {
+    let (client_transport, server_transport) = LoopbackTransport::pair(vec![0x01], vec![0x02]);
+    let mut client =
+        EndpointSession::new(client_transport, SessionRole::ClientOnly, session_config()).unwrap();
+    let mut server =
+        EndpointSession::new(server_transport, SessionRole::ServerOnly, session_config())
+            .unwrap()
+            .with_database(ObjectDatabase::new());
+    client.start().await.unwrap();
+    server.start().await.unwrap();
+
+    let database = server.database().expect("the server role has a database");
+    let mut analog = AnalogInputObject::new(9, "added-later", 0).unwrap();
+    analog.set_present_value(9.5);
+    database.write().await.add(Box::new(analog)).unwrap();
+
+    let ack = tokio::time::timeout(
+        WAIT,
+        client.client().unwrap().read_property(
+            &[0x02],
+            object_id(9),
+            PropertyIdentifier::PRESENT_VALUE,
+            None,
+        ),
+    )
+    .await
+    .expect("client read timed out")
+    .expect("client read failed");
+    assert_eq!(ack.object_identifier, object_id(9));
+
+    client.stop().await.unwrap();
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_server_role_without_a_database_shares_the_one_startup_creates() {
+    let (transport, _peer) = LoopbackTransport::pair(vec![0x01], vec![0x02]);
+    let mut session =
+        EndpointSession::new(transport, SessionRole::ServerOnly, session_config()).unwrap();
+    assert!(session.database().is_none());
+
+    session.start().await.unwrap();
+
+    assert!(session.database().is_some());
+    session.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn concurrent_equal_inbound_outbound_ids_stay_unambiguous() {
     // Both sessions start with empty coordinators, so both outbound requests
