@@ -683,6 +683,15 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self.server_handle.clone()
     }
 
+    /// The local object database, shared with the responder, for adding,
+    /// removing and updating objects while the session runs.
+    ///
+    /// `None` when no database was attached and startup has not created one
+    /// for the server role.
+    pub fn database(&self) -> Option<Arc<RwLock<ObjectDatabase>>> {
+        self.database.as_ref().map(Arc::clone)
+    }
+
     /// Samples policy-outcome ownership counters.
     ///
     /// Every classifier/policy outcome is counted, never silently dropped.
