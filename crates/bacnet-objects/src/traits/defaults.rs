@@ -69,6 +69,7 @@ pub(super) fn array_property_default(
         PropertyIdentifier::LIST_OF_OBJECT_PROPERTY_REFERENCES => {
             object_type == ObjectType::CHANNEL
         }
+        PropertyIdentifier::CONFIGURATION_FILES => object_type == ObjectType::DEVICE,
         PropertyIdentifier::VALUE_SOURCE_ARRAY => matches!(
             object_type,
             ObjectType::ANALOG_OUTPUT
