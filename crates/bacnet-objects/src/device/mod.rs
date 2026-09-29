@@ -8,12 +8,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bacnet_encoding::primitives::encode_timestamp_choice;
 use bacnet_types::enums::{
-    DeviceStatus, ErrorClass, ErrorCode, ObjectType, PropertyIdentifier, Segmentation,
-    ServiceSupported,
+    BackupAndRestoreState, DeviceStatus, ErrorClass, ErrorCode, ObjectType, PropertyIdentifier,
+    Segmentation, ServiceSupported,
 };
 use bacnet_types::error::Error;
-use bacnet_types::primitives::{ObjectIdentifier, PropertyValue};
+use bacnet_types::primitives::{BACnetTimeStamp, Date, ObjectIdentifier, PropertyValue, Time};
+use bytes::BytesMut;
 
 use crate::clock::{ClockFrame, ClockReader};
 use crate::common::read_property_list_property;
@@ -131,6 +133,12 @@ pub struct DeviceConfig {
     pub apdu_timeout: u32,
     /// Number of APDU retries.
     pub apdu_retries: u32,
+    /// Whether the device performs the backup and restore procedures (Clause 19.1), which
+    /// adds Configuration_Files, Last_Restore_Time, Backup_Failure_Timeout and
+    /// Backup_And_Restore_State. The application carries out the procedures themselves.
+    pub backup_and_restore: bool,
+    /// Initial Backup_Failure_Timeout in seconds. Only served with `backup_and_restore`.
+    pub backup_failure_timeout: u16,
 }
 
 impl Default for DeviceConfig {
@@ -147,8 +155,33 @@ impl Default for DeviceConfig {
             segmentation_supported: Segmentation::NONE,
             apdu_timeout: 6000,
             apdu_retries: 3,
+            backup_and_restore: false,
+            backup_failure_timeout: 60,
         }
     }
+}
+
+/// A date-and-time timestamp with every field unspecified.
+const UNSPECIFIED_TIMESTAMP: BACnetTimeStamp = BACnetTimeStamp::DateTime {
+    date: Date {
+        year: 0xFF,
+        month: 0xFF,
+        day: 0xFF,
+        day_of_week: 0xFF,
+    },
+    time: Time {
+        hour: 0xFF,
+        minute: 0xFF,
+        second: 0xFF,
+        hundredths: 0xFF,
+    },
+};
+
+fn timestamp_value(stamp: &BACnetTimeStamp) -> PropertyValue {
+    let mut encoded = BytesMut::new();
+    encode_timestamp_choice(&mut encoded, stamp)
+        .expect("BACnetTimeStamp CHOICE encoding is infallible");
+    PropertyValue::ApplicationData(encoded.to_vec())
 }
 
 /// BACnet Device object.
@@ -261,6 +294,29 @@ impl DeviceObject {
             PropertyValue::OctetString(vec![0u8; 16]),
         );
 
+        // Table 12-13 footnotes 7 and 8: present only on a device that performs the backup
+        // and restore procedures. The application owns the File objects Configuration_Files
+        // names, so the list starts empty.
+        if config.backup_and_restore {
+            properties.insert(
+                PropertyIdentifier::CONFIGURATION_FILES,
+                PropertyValue::List(Vec::new()),
+            );
+            // No restore has happened yet.
+            properties.insert(
+                PropertyIdentifier::LAST_RESTORE_TIME,
+                timestamp_value(&UNSPECIFIED_TIMESTAMP),
+            );
+            properties.insert(
+                PropertyIdentifier::BACKUP_FAILURE_TIMEOUT,
+                PropertyValue::Unsigned(u64::from(config.backup_failure_timeout)),
+            );
+            properties.insert(
+                PropertyIdentifier::BACKUP_AND_RESTORE_STATE,
+                PropertyValue::Enumerated(BackupAndRestoreState::IDLE.to_raw()),
+            );
+        }
+
         // Max_Segments_Accepted — only included when segmentation is supported.
         if config.segmentation_supported != Segmentation::NONE {
             let max_segments_accepted = if config.segmentation_supported == Segmentation::TRANSMIT {
@@ -366,6 +422,73 @@ impl DeviceObject {
             PropertyIdentifier::SYSTEM_STATUS,
             PropertyValue::Enumerated(status.to_raw()),
         );
+    }
+
+    /// Name the File objects that hold this device's configuration (`Configuration_Files`).
+    /// Ignored unless the device was built with [`DeviceConfig::backup_and_restore`].
+    pub fn set_configuration_files(&mut self, files: Vec<ObjectIdentifier>) {
+        self.set_backup_property(
+            PropertyIdentifier::CONFIGURATION_FILES,
+            PropertyValue::List(
+                files
+                    .into_iter()
+                    .map(PropertyValue::ObjectIdentifier)
+                    .collect(),
+            ),
+        );
+    }
+
+    /// Set `Backup_And_Restore_State`, where the device is in a backup or restore.
+    /// Ignored unless the device was built with [`DeviceConfig::backup_and_restore`].
+    pub fn set_backup_and_restore_state(&mut self, state: BackupAndRestoreState) {
+        self.set_backup_property(
+            PropertyIdentifier::BACKUP_AND_RESTORE_STATE,
+            PropertyValue::Enumerated(state.to_raw()),
+        );
+    }
+
+    /// Set `Last_Restore_Time`, when the last restore completed.
+    /// Ignored unless the device was built with [`DeviceConfig::backup_and_restore`].
+    pub fn set_last_restore_time(&mut self, time: BACnetTimeStamp) {
+        self.set_backup_property(
+            PropertyIdentifier::LAST_RESTORE_TIME,
+            timestamp_value(&time),
+        );
+    }
+
+    fn set_backup_property(&mut self, property: PropertyIdentifier, value: PropertyValue) {
+        if let Some(current) = self.properties.get_mut(&property) {
+            *current = value;
+        }
+    }
+
+    fn write_backup_failure_timeout(
+        &mut self,
+        array_index: Option<u32>,
+        value: PropertyValue,
+    ) -> Result<(), Error> {
+        let property_error = |code: ErrorCode| Error::Protocol {
+            class: ErrorClass::PROPERTY.to_raw() as u32,
+            code: code.to_raw() as u32,
+        };
+
+        if array_index.is_some() {
+            return Err(property_error(ErrorCode::PROPERTY_IS_NOT_AN_ARRAY));
+        }
+        // Clause 15.9: relinquishing a non-commandable writable property
+        // succeeds without changing its value when no other error exists.
+        match value {
+            PropertyValue::Null => Ok(()),
+            PropertyValue::Unsigned(seconds) if (1..=u64::from(u16::MAX)).contains(&seconds) => {
+                self.properties.insert(
+                    PropertyIdentifier::BACKUP_FAILURE_TIMEOUT,
+                    PropertyValue::Unsigned(seconds),
+                );
+                Ok(())
+            }
+            PropertyValue::Unsigned(_) => Err(property_error(ErrorCode::VALUE_OUT_OF_RANGE)),
+            _ => Err(property_error(ErrorCode::INVALID_DATA_TYPE)),
+        }
     }
 
     /// Replace the advertised executed-service set (`Protocol_Services_Supported`,
@@ -500,6 +623,24 @@ impl BACnetObject for DeviceObject {
             return read_property_list_property(&self.property_list(), array_index);
         }
 
+        if property == PropertyIdentifier::CONFIGURATION_FILES {
+            if let Some(PropertyValue::List(files)) = self.properties.get(&property) {
+                return match array_index {
+                    None => Ok(PropertyValue::List(files.clone())),
+                    Some(0) => Ok(PropertyValue::Unsigned(files.len() as u64)),
+                    Some(index) => {
+                        files
+                            .get((index - 1) as usize)
+                            .cloned()
+                            .ok_or(Error::Protocol {
+                                class: ErrorClass::PROPERTY.to_raw() as u32,
+                                code: ErrorCode::INVALID_ARRAY_INDEX.to_raw() as u32,
+                            })
+                    }
+                };
+            }
+        }
+
         if matches!(
             property,
             PropertyIdentifier::LOCAL_DATE
@@ -611,6 +752,11 @@ impl BACnetObject for DeviceObject {
                 class: ErrorClass::PROPERTY.to_raw() as u32,
                 code: ErrorCode::INVALID_DATA_TYPE.to_raw() as u32,
             });
+        }
+        if property == PropertyIdentifier::BACKUP_FAILURE_TIMEOUT
+            && self.properties.contains_key(&property)
+        {
+            return self.write_backup_failure_timeout(array_index, value);
         }
         Err(crate::common::unhandled_write_error(
             self.property_metadata().as_ref(),

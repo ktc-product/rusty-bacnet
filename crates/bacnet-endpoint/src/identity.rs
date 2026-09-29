@@ -503,6 +503,7 @@ impl DeviceIdentity {
             segmentation_supported: self.segmentation_supported,
             apdu_timeout: 6000,
             apdu_retries: 3,
+            ..DeviceConfig::default()
         })?;
         device.set_services_supported(&self.services);
         device.set_device_uuid(self.device_uuid);
@@ -595,6 +596,7 @@ pub fn build_database_with_extra(
         segmentation_supported: identity.segmentation_supported,
         apdu_timeout: 6000,
         apdu_retries: 3,
+        ..DeviceConfig::default()
     })?;
     device.set_services_supported(&identity.services);
     device.set_device_uuid(identity.device_uuid);
