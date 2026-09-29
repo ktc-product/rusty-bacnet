@@ -50,6 +50,9 @@ impl DeviceAuthority<'_> {
     pub fn set_services_supported(&mut self, services: &[ServiceSupported]) {
         self.0.set_services_supported(services);
     }
+    pub fn set_object_list(&mut self, oids: Vec<ObjectIdentifier>) {
+        self.0.set_object_list(oids);
+    }
     pub fn write_property(
         &mut self,
         property: PropertyIdentifier,
