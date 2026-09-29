@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bacnet_types::enums::{
-    ErrorClass, ErrorCode, ObjectType, PropertyIdentifier, Segmentation, ServiceSupported,
+    DeviceStatus, ErrorClass, ErrorCode, ObjectType, PropertyIdentifier, Segmentation,
+    ServiceSupported,
 };
 use bacnet_types::error::Error;
 use bacnet_types::primitives::{ObjectIdentifier, PropertyValue};
@@ -186,7 +187,7 @@ impl DeviceObject {
         );
         properties.insert(
             PropertyIdentifier::SYSTEM_STATUS,
-            PropertyValue::Enumerated(0), // operational
+            PropertyValue::Enumerated(DeviceStatus::OPERATIONAL.to_raw()),
         );
         properties.insert(
             PropertyIdentifier::VENDOR_NAME,
@@ -357,6 +358,14 @@ impl DeviceObject {
     /// Update the object-list with the current database contents.
     pub fn set_object_list(&mut self, oids: Vec<ObjectIdentifier>) {
         self.object_list = oids;
+    }
+
+    /// Set `System_Status`, the device's reported operating state.
+    pub fn set_system_status(&mut self, status: DeviceStatus) {
+        self.properties.insert(
+            PropertyIdentifier::SYSTEM_STATUS,
+            PropertyValue::Enumerated(status.to_raw()),
+        );
     }
 
     /// Replace the advertised executed-service set (`Protocol_Services_Supported`,
