@@ -715,6 +715,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self.server_handle.clone()
     }
 
+    /// The local object database, shared with the responder, for adding,
+    /// removing and updating objects while the session runs.
+    ///
+    /// `None` before [`start`](Self::start), which needs the database to
+    /// itself, and when no database was attached and startup created none for
+    /// the server role.
+    pub fn database(&self) -> Option<Arc<RwLock<ObjectDatabase>>> {
+        if self.lifecycle.load(Ordering::Acquire) == Lifecycle::Ready as u8 {
+            return None;
+        }
+        self.database.as_ref().map(Arc::clone)
+    }
+
     /// Samples policy-outcome ownership counters.
     ///
     /// Every classifier/policy outcome is counted, never silently dropped.
