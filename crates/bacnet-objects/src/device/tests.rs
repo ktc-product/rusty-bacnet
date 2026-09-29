@@ -269,6 +269,27 @@ fn set_object_list() {
     assert_eq!(count, PropertyValue::Unsigned(3));
 }
 
+/// The Device held as a `dyn BACnetObject`, as a database holds it.
+#[test]
+fn set_object_list_through_the_device_authority() {
+    let mut dev: Box<dyn BACnetObject> = Box::new(make_device());
+    let dev_oid = dev.object_identifier();
+    let ai1 = ObjectIdentifier::new(ObjectType::ANALOG_INPUT, 1).unwrap();
+
+    dev.device_authority_internal()
+        .expect("the Device has an authority")
+        .set_object_list(vec![dev_oid, ai1]);
+
+    assert_eq!(
+        dev.read_property(PropertyIdentifier::OBJECT_LIST, None)
+            .unwrap(),
+        PropertyValue::List(vec![
+            PropertyValue::ObjectIdentifier(dev_oid),
+            PropertyValue::ObjectIdentifier(ai1),
+        ])
+    );
+}
+
 #[test]
 fn property_list_contains_expected() {
     let dev = make_device();
