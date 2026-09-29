@@ -290,6 +290,26 @@ fn set_object_list_through_the_device_authority() {
 }
 
 #[test]
+fn set_system_status_through_the_device_authority() {
+    let mut dev: Box<dyn BACnetObject> = Box::new(make_device());
+    assert_eq!(
+        dev.read_property(PropertyIdentifier::SYSTEM_STATUS, None)
+            .unwrap(),
+        PropertyValue::Enumerated(DeviceStatus::OPERATIONAL.to_raw())
+    );
+
+    dev.device_authority_internal()
+        .expect("the Device has an authority")
+        .set_system_status(DeviceStatus::BACKUP_IN_PROGRESS);
+
+    assert_eq!(
+        dev.read_property(PropertyIdentifier::SYSTEM_STATUS, None)
+            .unwrap(),
+        PropertyValue::Enumerated(DeviceStatus::BACKUP_IN_PROGRESS.to_raw())
+    );
+}
+
+#[test]
 fn property_list_contains_expected() {
     let dev = make_device();
     let props = dev.property_list();
