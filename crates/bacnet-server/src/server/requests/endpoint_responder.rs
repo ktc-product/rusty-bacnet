@@ -65,8 +65,9 @@ fn device_write_target<'a>(
 ///
 /// Handles `ReadProperty`, optionally authorized local Device
 /// Description/active recipient `WriteProperty`, optionally `ReinitializeDevice`
-/// through its handler, optionally `AtomicReadFile`, plus `Reject`/`Abort`. Full
-/// service parity is a later packet. Inbound transactions reuse the
+/// through its handler, optionally `AtomicReadFile` and `AtomicWriteFile`, plus
+/// `Reject`/`Abort`. Full service parity is a later packet. Inbound transactions
+/// reuse the
 /// wire invoke ID directly and NEVER allocate from the shared outbound
 /// client ID pool, so equal inbound/outbound numeric IDs stay unambiguous
 /// via the ingress classifier + coordinator admission.
@@ -79,6 +80,7 @@ pub struct EndpointResponder {
     device_writes: Option<(ObjectIdentifier, MutationAuthorizer)>,
     reinitialize: Option<(ReinitializeHandler, Option<String>)>,
     file_reads: Option<AtomicReadFileBudget>,
+    file_writes: Option<AtomicWriteFileBudget>,
     registered_port: Option<(ObjectIdentifier, std::sync::Weak<()>)>,
     read_work_limit: usize,
 }
@@ -105,6 +107,7 @@ impl EndpointResponder {
             device_writes: None,
             reinitialize: None,
             file_reads: None,
+            file_writes: None,
             registered_port: None,
             read_work_limit: crate::server::ReadPropertyMultipleBudget::default()
                 .max_result_elements,
@@ -166,11 +169,19 @@ impl EndpointResponder {
         self
     }
 
+    /// Serve AtomicWriteFile within `budget`.
+    #[doc(hidden)]
+    pub fn with_file_writes(mut self, budget: AtomicWriteFileBudget) -> Self {
+        self.file_writes = Some(budget);
+        self
+    }
+
     fn execution(&self) -> DeviceExecution {
         DeviceExecution::Endpoint {
             writes: self.device_writes.is_some(),
             reinitialize: self.reinitialize.is_some(),
             file_reads: self.file_reads.is_some(),
+            file_writes: self.file_writes.is_some(),
         }
     }
 
@@ -309,6 +320,9 @@ impl EndpointResponder {
         let file_read_budget = self
             .file_reads
             .filter(|_| request.service_choice == ConfirmedServiceChoice::ATOMIC_READ_FILE);
+        let file_write_budget = self
+            .file_writes
+            .filter(|_| request.service_choice == ConfirmedServiceChoice::ATOMIC_WRITE_FILE);
         let mut response = if request.segmented {
             Apdu::Abort(AbortPdu {
                 sent_by_server: true,
@@ -350,6 +364,23 @@ impl EndpointResponder {
                 budget,
                 |_, _| {},
             )
+        } else if let Some(budget) = file_write_budget {
+            let mut db = self.db().write().await;
+            // Close may win while this request waits for the database owner.
+            match self.ensure_open() {
+                Ok(()) => super::atomic_write_file::atomic_write_file_response(
+                    &mut db,
+                    invoke_id,
+                    &request.service_request,
+                    budget,
+                    |_, _, _| {},
+                ),
+                Err(error) => confirmed_response::error_apdu_from_error(
+                    invoke_id,
+                    request.service_choice,
+                    &error,
+                ),
+            }
         } else if request.service_choice == ConfirmedServiceChoice::WRITE_PROPERTY
             && self.device_writes.is_some()
         {

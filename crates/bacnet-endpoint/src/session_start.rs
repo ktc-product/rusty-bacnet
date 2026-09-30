@@ -81,6 +81,10 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                     responder = responder
                         .with_file_reads(bacnet_server::server::AtomicReadFileBudget::default());
                 }
+                if self.file_writes {
+                    responder = responder
+                        .with_file_writes(bacnet_server::server::AtomicWriteFileBudget::default());
+                }
                 let responder = Arc::new(responder);
                 let handle = ServerRoleHandle::new(
                     &self.shared.token,
