@@ -297,6 +297,7 @@ pub struct EndpointSession<T: TransportPort + 'static> {
     pub(crate) reinit_password: Option<String>,
     pub(crate) file_reads: bool,
     pub(crate) file_writes: bool,
+    pub(crate) writes: bool,
     egress: Option<bacnet_endpoint_core::endpoint_ingress::EndpointEgress>,
     /// The B/IP transport's own exchanges, when the B/IP builder built it.
     pub(crate) bip_status: Option<bacnet_transport::bip::BvlcClientStatus>,
@@ -407,6 +408,7 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             reinit_password: None,
             file_reads: false,
             file_writes: false,
+            writes: false,
             egress: None,
             bip_status: None,
         })

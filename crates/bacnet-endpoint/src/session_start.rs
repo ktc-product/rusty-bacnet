@@ -74,6 +74,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 {
                     responder = responder.with_device_writes(device, authorizer);
                 }
+                if self.writes {
+                    responder = responder.with_writes();
+                }
                 if let Some(handler) = self.reinitialize.clone() {
                     responder = responder.with_reinitialize(handler, self.reinit_password.clone());
                 }
