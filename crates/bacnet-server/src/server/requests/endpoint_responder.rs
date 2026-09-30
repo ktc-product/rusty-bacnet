@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::device_view::DeviceExecution;
 use crate::mutation::{
     MutationAuthorizationContext, MutationAuthorizer, MutationTarget, MutationTrust,
 };
@@ -64,8 +65,8 @@ fn device_write_target<'a>(
 ///
 /// Handles `ReadProperty`, optionally authorized local Device
 /// Description/active recipient `WriteProperty`, optionally `ReinitializeDevice`
-/// through its handler, plus `Reject`/`Abort`. Full service parity is a later
-/// packet. Inbound transactions reuse the
+/// through its handler, optionally `AtomicReadFile`, plus `Reject`/`Abort`. Full
+/// service parity is a later packet. Inbound transactions reuse the
 /// wire invoke ID directly and NEVER allocate from the shared outbound
 /// client ID pool, so equal inbound/outbound numeric IDs stay unambiguous
 /// via the ingress classifier + coordinator admission.
@@ -77,6 +78,7 @@ pub struct EndpointResponder {
     open: AtomicBool,
     device_writes: Option<(ObjectIdentifier, MutationAuthorizer)>,
     reinitialize: Option<(ReinitializeHandler, Option<String>)>,
+    file_reads: Option<AtomicReadFileBudget>,
     registered_port: Option<(ObjectIdentifier, std::sync::Weak<()>)>,
     read_work_limit: usize,
 }
@@ -102,6 +104,7 @@ impl EndpointResponder {
             open: AtomicBool::new(true),
             device_writes: None,
             reinitialize: None,
+            file_reads: None,
             registered_port: None,
             read_work_limit: crate::server::ReadPropertyMultipleBudget::default()
                 .max_result_elements,
@@ -154,6 +157,21 @@ impl EndpointResponder {
     ) -> Self {
         self.reinitialize = Some((handler, password));
         self
+    }
+
+    /// Serve AtomicReadFile within `budget`.
+    #[doc(hidden)]
+    pub fn with_file_reads(mut self, budget: AtomicReadFileBudget) -> Self {
+        self.file_reads = Some(budget);
+        self
+    }
+
+    fn execution(&self) -> DeviceExecution {
+        DeviceExecution::Endpoint {
+            writes: self.device_writes.is_some(),
+            reinitialize: self.reinitialize.is_some(),
+            file_reads: self.file_reads.is_some(),
+        }
     }
 
     /// Refuses once the session owner has closed this responder.
@@ -288,6 +306,9 @@ impl EndpointResponder {
             .reinitialize
             .as_ref()
             .filter(|_| request.service_choice == ConfirmedServiceChoice::REINITIALIZE_DEVICE);
+        let file_read_budget = self
+            .file_reads
+            .filter(|_| request.service_choice == ConfirmedServiceChoice::ATOMIC_READ_FILE);
         let mut response = if request.segmented {
             Apdu::Abort(AbortPdu {
                 sent_by_server: true,
@@ -298,8 +319,7 @@ impl EndpointResponder {
             confirmed_response::read_property_response(
                 self.db(),
                 &request,
-                self.device_writes.is_some(),
-                self.reinitialize.is_some(),
+                self.execution(),
                 self.registered_port.as_ref().map(|(oid, _)| *oid),
                 self.read_work_limit,
             )
@@ -322,6 +342,14 @@ impl EndpointResponder {
                 still_open,
             )
             .await
+        } else if let Some(budget) = file_read_budget {
+            super::atomic_read_file::atomic_read_file_response(
+                &*self.db().read().await,
+                invoke_id,
+                &request.service_request,
+                budget,
+                |_, _| {},
+            )
         } else if request.service_choice == ConfirmedServiceChoice::WRITE_PROPERTY
             && self.device_writes.is_some()
         {

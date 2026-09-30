@@ -64,6 +64,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables AtomicReadFile for the File objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.file_reads = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// It takes effect only with [`with_reinitialize`](Self::with_reinitialize):
@@ -86,6 +99,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         if self.reinitialize.is_some() {
             services.push(ServiceSupported::REINITIALIZE_DEVICE);
         }
+        if self.file_reads {
+            services.push(ServiceSupported::ATOMIC_READ_FILE);
+        }
         services
     }
 
@@ -98,19 +114,32 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             ));
         }
         // Names the enabled capabilities that need the Device.
-        let (capability, subject) = match (writes, reinitialize) {
-            (true, true) => (
-                "Device writes and ReinitializeDevice",
-                "Device writes and ReinitializeDevice require",
-            ),
-            (true, false) => ("Device writes", "Device writes require"),
-            (false, _) => ("ReinitializeDevice", "ReinitializeDevice requires"),
-        };
-        if self.role == SessionRole::ClientOnly {
-            return if writes || reinitialize {
-                Err(Error::Encoding(format!("{subject} a server role")))
+        let enabled: Vec<&str> = [
+            (writes, "Device writes"),
+            (reinitialize, "ReinitializeDevice"),
+            (self.file_reads, "AtomicReadFile"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let capability = match enabled.as_slice() {
+            [] => None,
+            [only] => Some((*only).to_owned()),
+            [first @ .., last] => Some(format!("{} and {last}", first.join(", "))),
+        }
+        .map(|capability| {
+            let verb = if enabled == ["Device writes"] || enabled.len() > 1 {
+                "require"
             } else {
-                Ok(None)
+                "requires"
+            };
+            let subject = format!("{capability} {verb}");
+            (capability, subject)
+        });
+        if self.role == SessionRole::ClientOnly {
+            return match capability {
+                Some((_, subject)) => Err(Error::Encoding(format!("{subject} a server role"))),
+                None => Ok(None),
             };
         }
         let allowed = self.executed_services();
@@ -127,9 +156,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "Endpoint identity services do not match the responder's services".into(),
             ));
         }
-        if !writes && !reinitialize {
+        let Some((capability, subject)) = capability else {
             return Ok(None);
-        }
+        };
         let db = self
             .database
             .as_mut()

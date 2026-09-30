@@ -536,3 +536,6 @@ mod execution;
 
 #[path = "reinitialize_tests.rs"]
 mod reinitialize;
+
+#[path = "file_reads_tests.rs"]
+mod file_reads;

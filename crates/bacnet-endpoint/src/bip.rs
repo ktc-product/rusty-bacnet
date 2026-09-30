@@ -70,6 +70,7 @@ pub struct BipEndpointBuilder {
     device_write_authorizer: Option<bacnet_server::mutation::MutationAuthorizer>,
     reinitialize: Option<bacnet_server::server::ReinitializeHandler>,
     reinit_password: Option<String>,
+    file_reads: bool,
     source_audit_bindings: Vec<(ObjectIdentifier, SocketAddrV4)>,
     bbmd_bdt: Option<Vec<BdtEntry>>,
     foreign_policy: Option<ForeignDevicePolicy>,
@@ -100,6 +101,7 @@ impl BipEndpointBuilder {
             device_write_authorizer: None,
             reinitialize: None,
             reinit_password: None,
+            file_reads: false,
             source_audit_bindings: Vec::new(),
             bbmd_bdt: None,
             foreign_policy: None,
@@ -226,6 +228,13 @@ impl BipEndpointBuilder {
         self
     }
 
+    /// Enables AtomicReadFile. See [`EndpointSession::with_file_reads`].
+    /// Requires `build_session()`.
+    pub fn file_reads(mut self) -> Self {
+        self.file_reads = true;
+        self
+    }
+
     /// Register one trusted direct IPv4 B/IP route for source Audit delivery.
     /// This is route data only; provision the recipient on the actual Device.
     /// Multiple entries may resolve old/new Device choices. Duplicate keys,
@@ -327,6 +336,11 @@ impl BipEndpointBuilder {
                 "ReinitializeDevice and its password require build_session()".into(),
             ));
         }
+        if self.file_reads {
+            return Err(Error::Encoding(
+                "AtomicReadFile requires build_session()".into(),
+            ));
+        }
         if !self.source_audit_bindings.is_empty() {
             return Err(Error::Encoding(
                 "source Audit route data requires build_session()".into(),
@@ -382,6 +396,7 @@ impl BipEndpointBuilder {
         let device_write_authorizer = self.device_write_authorizer.take();
         let reinitialize = self.reinitialize.take();
         let reinit_password = self.reinit_password.take();
+        let file_reads = std::mem::take(&mut self.file_reads);
         let bindings = std::mem::take(&mut self.source_audit_bindings);
         crate::source_audit::recipient::SourceRoutes::new(
             &bindings,
@@ -408,6 +423,7 @@ impl BipEndpointBuilder {
         }
         endpoint.reinitialize = reinitialize;
         endpoint.reinit_password = reinit_password;
+        endpoint.file_reads = file_reads;
         endpoint.source_audit_bindings = bindings;
         Ok(endpoint)
     }
