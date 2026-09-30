@@ -150,20 +150,22 @@ impl Request<'_> {
         )
         .await;
         let database = db;
-        let (result, exact_changes, plans, schedule_cov) = {
+        let (result, exact_changes, plans, schedule_cov, property_writes) = {
             let mut db = db.write().await;
             let snapshots = crate::life_safety_cov::LifeSafetyCovSnapshots::capture_write_property(
                 &db,
                 &self.req.service_request,
             );
             let source = audit.write_source();
+            let mut recording = super::super::property_write::RecordingObserver::new(Some(audit));
             let result = handlers::handle_write_property_observed(
                 &mut db,
                 &self.req.service_request,
-                Some(audit),
+                Some(&mut recording),
                 Some(&source),
                 self.command_origin,
             );
+            let property_writes = recording.into_written();
             staged.release(&mut db);
             // Post-write work follows a change. A NULL the property left as
             // it was (`handlers::relinquish`) is acknowledged with none.
@@ -205,8 +207,18 @@ impl Request<'_> {
                 }
                 None => Default::default(),
             };
-            (result.map(|_| written), changes, plans, schedule_cov)
+            (
+                result.map(|_| written),
+                changes,
+                plans,
+                schedule_cov,
+                property_writes,
+            )
         };
+        super::super::property_write::report(
+            self.config.on_property_written.as_ref(),
+            property_writes,
+        );
         staging_plans.extend(plans);
         let response = match result {
             Ok(Some(oid)) => {
@@ -248,7 +260,7 @@ impl Request<'_> {
         let targets = ahead.targets(self, db).await;
         let staged = durable_writes::stage(db, targets).await;
         let database = db;
-        let (outcome, exact_changes, plans, schedule_cov) = {
+        let (outcome, exact_changes, plans, schedule_cov, property_writes) = {
             let mut db = db.write().await;
             // Lock order: database, then a short table read. Each attempt is
             // captured as it commits, under this guard (#856).
@@ -262,15 +274,18 @@ impl Request<'_> {
                 };
             let source = audit.write_source();
             let mut observer = crate::cov::TimedWriteCapture::new(capture, Some(audit));
+            let mut recording =
+                super::super::property_write::RecordingObserver::new(Some(&mut observer));
             let outcome = handlers::handle_write_property_multiple_observed(
                 &mut db,
                 &self.req.service_request,
                 &mut snapshots,
                 Some(&authorize),
-                Some(&mut observer),
+                Some(&mut recording),
                 Some(&source),
                 self.command_origin,
             );
+            let property_writes = recording.into_written();
             staged.release(&mut db);
             let committed_oids = match &outcome {
                 handlers::WritePropertyMultipleOutcome::Success { committed_oids }
@@ -286,8 +301,12 @@ impl Request<'_> {
             let schedule_cov =
                 crate::schedule::reevaluate_written(database, &mut db, committed_oids, cov_table)
                     .await;
-            (outcome, changes, plans, schedule_cov)
+            (outcome, changes, plans, schedule_cov, property_writes)
         };
+        super::super::property_write::report(
+            self.config.on_property_written.as_ref(),
+            property_writes,
+        );
         staging_plans.extend(plans);
         let response = match outcome {
             handlers::WritePropertyMultipleOutcome::Success { committed_oids } => {

@@ -32,6 +32,9 @@ pub(crate) trait WriteCommitObserver: Send {
     /// after `committed`, and also for the Device-owned recipient write that
     /// bypasses `before` and `committed`.
     fn applied(&mut self, _db: &ObjectDatabase, _oid: ObjectIdentifier) {}
+    /// The write that took effect, with what the request carried. Called with
+    /// `applied`, so a NULL the property left as it was gets neither.
+    fn written(&mut self, _db: &ObjectDatabase, _write: WriteTarget<'_>) {}
 }
 
 /// What a successful write attempt did to its object.
@@ -224,6 +227,16 @@ pub(crate) fn handle_write_property_multiple_observed(
                     }
                     if let Some(observer) = observer.as_deref_mut() {
                         observer.applied(db, oid);
+                        observer.written(
+                            db,
+                            WriteTarget {
+                                oid,
+                                property,
+                                array_index: reference.property_array_index,
+                                priority: attempt.priority,
+                                value: &attempt.value,
+                            },
+                        );
                     }
                     wrote = true;
                     if !committed_oids.contains(&oid) {
@@ -331,6 +344,7 @@ pub(super) fn commit_attempt(
         observer.committed(db);
         if applied == Applied::Written {
             observer.applied(db, target.oid);
+            observer.written(db, target);
         }
     }
     Ok(applied)
@@ -707,6 +721,16 @@ pub(crate) fn handle_write_property_observed(
                 )?;
                 if let Some(observer) = observer {
                     observer.applied(db, oid);
+                    observer.written(
+                        db,
+                        WriteTarget {
+                            oid,
+                            property: request.property_identifier,
+                            array_index: request.property_array_index,
+                            priority: request.priority,
+                            value: &request.property_value,
+                        },
+                    );
                 }
                 return Ok((oid, Applied::Written));
             }

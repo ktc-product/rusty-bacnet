@@ -48,6 +48,8 @@ mod mutation_list_element_number_tests;
 #[cfg(test)]
 mod mutation_list_wire_tests;
 #[cfg(test)]
+mod mutation_property_write_tests;
+#[cfg(test)]
 mod mutation_provenance_tests;
 #[cfg(test)]
 mod mutation_tests;

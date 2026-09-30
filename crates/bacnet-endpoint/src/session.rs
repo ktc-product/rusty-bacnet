@@ -298,6 +298,7 @@ pub struct EndpointSession<T: TransportPort + 'static> {
     pub(crate) file_reads: bool,
     pub(crate) file_writes: bool,
     pub(crate) writes: bool,
+    pub(crate) write_observer: Option<bacnet_server::server::PropertyWriteObserver>,
     egress: Option<bacnet_endpoint_core::endpoint_ingress::EndpointEgress>,
     /// The B/IP transport's own exchanges, when the B/IP builder built it.
     pub(crate) bip_status: Option<bacnet_transport::bip::BvlcClientStatus>,
@@ -409,6 +410,7 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             file_reads: false,
             file_writes: false,
             writes: false,
+            write_observer: None,
             egress: None,
             bip_status: None,
         })
