@@ -121,24 +121,42 @@ fn context_and_ordinary_reads_do_not_sample_the_clock() {
 fn endpoint_services_do_not_sample_the_clock() {
     let clock = CountingClock::new(true);
     let db = database(Some(clock.clone()));
-    for writes in [false, true] {
-        for reinitialize in [false, true] {
-            let context = DeviceReadContext::new(
-                &db,
-                DeviceExecution::Endpoint {
-                    writes,
-                    reinitialize,
-                },
-            );
-            let value = services(&context, &db);
-            assert_clock_services(value.clone(), false);
-            let supported = supported(value);
-            assert_eq!(supported.contains(ServiceSupported::WRITE_PROPERTY), writes);
-            assert_eq!(
-                supported.contains(ServiceSupported::REINITIALIZE_DEVICE),
-                reinitialize
-            );
-        }
+    for profile in 0..32u8 {
+        let writes = profile & 1 != 0;
+        let reinitialize = profile & 2 != 0;
+        let file_reads = profile & 4 != 0;
+        let file_writes = profile & 8 != 0;
+        let multiple_reads = profile & 16 != 0;
+        let context = DeviceReadContext::new(
+            &db,
+            DeviceExecution::Endpoint {
+                writes,
+                reinitialize,
+                file_reads,
+                file_writes,
+                multiple_reads,
+            },
+        );
+        let value = services(&context, &db);
+        assert_clock_services(value.clone(), false);
+        let supported = supported(value);
+        assert_eq!(supported.contains(ServiceSupported::WRITE_PROPERTY), writes);
+        assert_eq!(
+            supported.contains(ServiceSupported::REINITIALIZE_DEVICE),
+            reinitialize
+        );
+        assert_eq!(
+            supported.contains(ServiceSupported::ATOMIC_READ_FILE),
+            file_reads
+        );
+        assert_eq!(
+            supported.contains(ServiceSupported::ATOMIC_WRITE_FILE),
+            file_writes
+        );
+        assert_eq!(
+            supported.contains(ServiceSupported::READ_PROPERTY_MULTIPLE),
+            multiple_reads
+        );
     }
     assert_eq!(clock.reads(), 0);
 }

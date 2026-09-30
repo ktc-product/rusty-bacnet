@@ -77,6 +77,12 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 {
                     responder = responder.with_device_writes(device, authorizer);
                 }
+                if self.writes {
+                    responder = responder.with_writes();
+                }
+                if let Some(observer) = self.write_observer.clone() {
+                    responder = responder.with_write_observer(observer);
+                }
                 if let Some(handler) = self.reinitialize.clone() {
                     responder = responder.with_reinitialize(handler, self.reinit_password.clone());
                     // The session's Reporter records an accepted reset,
@@ -91,6 +97,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                             },
                         ));
                     }
+                }
+                if self.file_reads {
+                    responder = responder
+                        .with_file_reads(bacnet_server::server::AtomicReadFileBudget::default());
+                }
+                if self.file_writes {
+                    responder = responder
+                        .with_file_writes(bacnet_server::server::AtomicWriteFileBudget::default());
+                }
+                if self.multiple_reads {
+                    responder = responder.with_multiple_reads(
+                        bacnet_server::server::ReadPropertyMultipleBudget::default(),
+                    );
                 }
                 let responder = Arc::new(responder);
                 let handle = ServerRoleHandle::new(

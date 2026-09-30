@@ -63,6 +63,11 @@ pub struct BipEndpointBuilder {
     device_write_authorizer: Option<bacnet_server::mutation::MutationAuthorizer>,
     reinitialize: Option<bacnet_server::server::ReinitializeHandler>,
     reinit_password: Option<String>,
+    file_reads: bool,
+    file_writes: bool,
+    multiple_reads: bool,
+    writes: bool,
+    write_observer: Option<bacnet_server::server::PropertyWriteObserver>,
     source_audit_bindings: Vec<(ObjectIdentifier, SocketAddrV4)>,
     mode: BipMode,
 }
@@ -88,6 +93,11 @@ impl BipEndpointBuilder {
             device_write_authorizer: None,
             reinitialize: None,
             reinit_password: None,
+            file_reads: false,
+            file_writes: false,
+            multiple_reads: false,
+            writes: false,
+            write_observer: None,
             source_audit_bindings: Vec::new(),
             mode: BipMode::Normal,
         }
@@ -211,6 +221,43 @@ impl BipEndpointBuilder {
         self
     }
 
+    /// Enables AtomicReadFile. See [`EndpointSession::with_file_reads`].
+    /// Requires `build_session()`.
+    pub fn file_reads(mut self) -> Self {
+        self.file_reads = true;
+        self
+    }
+
+    /// Enables AtomicWriteFile. See [`EndpointSession::with_file_writes`].
+    /// Requires `build_session()`.
+    pub fn file_writes(mut self) -> Self {
+        self.file_writes = true;
+        self
+    }
+
+    /// Enables ReadPropertyMultiple. See [`EndpointSession::with_multiple_reads`].
+    /// Requires `build_session()`.
+    pub fn multiple_reads(mut self) -> Self {
+        self.multiple_reads = true;
+        self
+    }
+
+    /// Enables WriteProperty to any object. See [`EndpointSession::with_writes`].
+    /// Requires `build_session()`.
+    pub fn writes(mut self) -> Self {
+        self.writes = true;
+        self
+    }
+
+    /// See [`EndpointSession::with_write_observer`]. Requires `build_session()`.
+    pub fn write_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(bacnet_server::server::PropertyWriteData) + Send + Sync + 'static,
+    {
+        self.write_observer = Some(std::sync::Arc::new(observer));
+        self
+    }
+
     /// Register one trusted direct IPv4 B/IP route for source Audit delivery.
     /// This is route data only; provision the recipient on the actual Device.
     /// Multiple entries may resolve old/new Device choices. Duplicate keys,
@@ -261,6 +308,31 @@ impl BipEndpointBuilder {
                 "ReinitializeDevice and its password require build_session()".into(),
             ));
         }
+        if self.file_reads {
+            return Err(Error::Encoding(
+                "AtomicReadFile requires build_session()".into(),
+            ));
+        }
+        if self.file_writes {
+            return Err(Error::Encoding(
+                "AtomicWriteFile requires build_session()".into(),
+            ));
+        }
+        if self.multiple_reads {
+            return Err(Error::Encoding(
+                "ReadPropertyMultiple requires build_session()".into(),
+            ));
+        }
+        if self.writes {
+            return Err(Error::Encoding(
+                "WriteProperty requires build_session()".into(),
+            ));
+        }
+        if self.write_observer.is_some() {
+            return Err(Error::Encoding(
+                "a write observer requires build_session()".into(),
+            ));
+        }
         if !self.source_audit_bindings.is_empty() {
             return Err(Error::Encoding(
                 "source Audit route data requires build_session()".into(),
@@ -282,6 +354,11 @@ impl BipEndpointBuilder {
         let device_write_authorizer = self.device_write_authorizer.take();
         let reinitialize = self.reinitialize.take();
         let reinit_password = self.reinit_password.take();
+        let file_reads = std::mem::take(&mut self.file_reads);
+        let file_writes = std::mem::take(&mut self.file_writes);
+        let multiple_reads = std::mem::take(&mut self.multiple_reads);
+        let writes = std::mem::take(&mut self.writes);
+        let write_observer = self.write_observer.take();
         let bindings = std::mem::take(&mut self.source_audit_bindings);
         crate::source_audit::recipient::SourceRoutes::new(
             &bindings,
@@ -310,6 +387,11 @@ impl BipEndpointBuilder {
         }
         endpoint.reinitialize = reinitialize;
         endpoint.reinit_password = reinit_password;
+        endpoint.file_reads = file_reads;
+        endpoint.file_writes = file_writes;
+        endpoint.multiple_reads = multiple_reads;
+        endpoint.writes = writes;
+        endpoint.write_observer = write_observer;
         endpoint.source_audit_bindings = bindings;
         Ok(endpoint)
     }

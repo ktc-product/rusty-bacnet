@@ -31,7 +31,13 @@ use std::time::Duration;
 #[derive(Clone, Copy)]
 pub(crate) enum DeviceExecution {
     FullServer,
-    Endpoint { writes: bool, reinitialize: bool },
+    Endpoint {
+        writes: bool,
+        reinitialize: bool,
+        file_reads: bool,
+        file_writes: bool,
+        multiple_reads: bool,
+    },
 }
 
 impl DeviceExecution {
@@ -41,6 +47,9 @@ impl DeviceExecution {
             Self::Endpoint {
                 writes,
                 reinitialize,
+                file_reads,
+                file_writes,
+                multiple_reads,
             } => {
                 let mut services = vec![ServiceSupported::READ_PROPERTY];
                 if writes {
@@ -48,6 +57,15 @@ impl DeviceExecution {
                 }
                 if reinitialize {
                     services.push(ServiceSupported::REINITIALIZE_DEVICE);
+                }
+                if file_reads {
+                    services.push(ServiceSupported::ATOMIC_READ_FILE);
+                }
+                if file_writes {
+                    services.push(ServiceSupported::ATOMIC_WRITE_FILE);
+                }
+                if multiple_reads {
+                    services.push(ServiceSupported::READ_PROPERTY_MULTIPLE);
                 }
                 services
             }

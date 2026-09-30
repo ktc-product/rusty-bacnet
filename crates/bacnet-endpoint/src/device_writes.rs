@@ -32,6 +32,34 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables WriteProperty to any object in the attached database, as each object's write
+    /// access allows.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes), and startup refuses the two together.
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.writes = true;
+        self
+    }
+
+    /// Calls `observer` for each property a peer's WriteProperty changed. Startup requires
+    /// [`with_writes`](Self::with_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_write_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(bacnet_server::server::PropertyWriteData) + Send + Sync + 'static,
+    {
+        self.assert_configurable();
+        self.write_observer = Some(Arc::new(observer));
+        self
+    }
+
     /// Enables ReinitializeDevice, carried out by `handler` with the
     /// requester's [`ReinitializeContext`] and the database write-locked.
     ///
@@ -66,6 +94,46 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables AtomicReadFile for the File objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.file_reads = true;
+        self
+    }
+
+    /// Enables AtomicWriteFile for the File objects in the attached database.
+    ///
+    /// A File's Read_Only property decides whether it accepts a write. Startup
+    /// requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.file_writes = true;
+        self
+    }
+
+    /// Enables ReadPropertyMultiple for the objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_multiple_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.multiple_reads = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// It takes effect only with [`with_reinitialize`](Self::with_reinitialize):
@@ -82,11 +150,20 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     /// The services the responder executes with the capabilities enabled on this session.
     fn executed_services(&self) -> Vec<ServiceSupported> {
         let mut services = vec![ServiceSupported::READ_PROPERTY];
-        if self.device_write_authorizer.is_some() {
+        if self.device_write_authorizer.is_some() || self.writes {
             services.push(ServiceSupported::WRITE_PROPERTY);
         }
         if self.reinitialize.is_some() {
             services.push(ServiceSupported::REINITIALIZE_DEVICE);
+        }
+        if self.file_reads {
+            services.push(ServiceSupported::ATOMIC_READ_FILE);
+        }
+        if self.file_writes {
+            services.push(ServiceSupported::ATOMIC_WRITE_FILE);
+        }
+        if self.multiple_reads {
+            services.push(ServiceSupported::READ_PROPERTY_MULTIPLE);
         }
         services
     }
@@ -129,20 +206,46 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "a ReinitializeDevice password requires a ReinitializeDevice handler".into(),
             ));
         }
+        if self.writes && writes {
+            return Err(Error::Encoding(
+                "WriteProperty to any object and Device writes are exclusive".into(),
+            ));
+        }
+        if self.write_observer.is_some() && !self.writes {
+            return Err(Error::Encoding(
+                "a write observer requires WriteProperty to any object".into(),
+            ));
+        }
         // Names the enabled capabilities that need the Device.
-        let (capability, subject) = match (writes, reinitialize) {
-            (true, true) => (
-                "Device writes and ReinitializeDevice",
-                "Device writes and ReinitializeDevice require",
-            ),
-            (true, false) => ("Device writes", "Device writes require"),
-            (false, _) => ("ReinitializeDevice", "ReinitializeDevice requires"),
-        };
-        if self.role == SessionRole::ClientOnly {
-            return if writes || reinitialize {
-                Err(Error::Encoding(format!("{subject} a server role")))
+        let enabled: Vec<&str> = [
+            (writes, "Device writes"),
+            (self.writes, "WriteProperty"),
+            (reinitialize, "ReinitializeDevice"),
+            (self.file_reads, "AtomicReadFile"),
+            (self.file_writes, "AtomicWriteFile"),
+            (self.multiple_reads, "ReadPropertyMultiple"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let capability = match enabled.as_slice() {
+            [] => None,
+            [only] => Some((*only).to_owned()),
+            [first @ .., last] => Some(format!("{} and {last}", first.join(", "))),
+        }
+        .map(|capability| {
+            let verb = if enabled == ["Device writes"] || enabled.len() > 1 {
+                "require"
             } else {
-                Ok(None)
+                "requires"
+            };
+            let subject = format!("{capability} {verb}");
+            (capability, subject)
+        });
+        if self.role == SessionRole::ClientOnly {
+            return match capability {
+                Some((_, subject)) => Err(Error::Encoding(format!("{subject} a server role"))),
+                None => Ok(None),
             };
         }
         let allowed = self.executed_services();
@@ -159,9 +262,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "Endpoint identity services do not match the responder's services".into(),
             ));
         }
-        if !writes && !reinitialize {
+        let Some((capability, subject)) = capability else {
             return Ok(None);
-        }
+        };
         let db = self
             .database
             .as_mut()

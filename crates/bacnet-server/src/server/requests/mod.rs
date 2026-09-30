@@ -49,6 +49,8 @@ mod mutation_list_element_number_tests;
 #[cfg(test)]
 mod mutation_list_wire_tests;
 #[cfg(test)]
+mod mutation_property_write_tests;
+#[cfg(test)]
 mod mutation_provenance_tests;
 #[cfg(test)]
 mod mutation_tests;
@@ -320,7 +322,7 @@ impl<T: TransportPort + 'static> BACnetServer<T> {
             }
             s if s == ConfirmedServiceChoice::ATOMIC_READ_FILE => {
                 let db = db.read().await;
-                Self::atomic_read_file_response(
+                atomic_read_file::atomic_read_file_response(
                     &db,
                     invoke_id,
                     &req.service_request,
