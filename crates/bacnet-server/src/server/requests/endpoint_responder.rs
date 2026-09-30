@@ -61,11 +61,25 @@ fn device_write_target<'a>(
         .ok_or_else(|| property_error(ErrorClass::PROPERTY, ErrorCode::WRITE_ACCESS_DENIED))
 }
 
+/// The original sender of a request; routed senders keep SNET/SADR.
+fn source_address(received: &ReceivedApdu) -> bacnet_types::constructed::BACnetAddress {
+    bacnet_types::constructed::BACnetAddress {
+        network_number: received
+            .source_network
+            .as_ref()
+            .map_or(0, |source| source.network),
+        mac_address: received.source_network.as_ref().map_or_else(
+            || received.source_mac.clone(),
+            |source| source.mac_address.clone(),
+        ),
+    }
+}
+
 /// Composition-visible inbound responder (narrow service scope).
 ///
-/// Handles `ReadProperty`, optionally authorized local Device Description/active recipient
-/// `WriteProperty`, and optionally `ReinitializeDevice`, `AtomicReadFile` and
-/// `AtomicWriteFile`, plus `Reject`/`Abort`. Inbound transactions reuse the
+/// Handles `ReadProperty`, `WriteProperty` either to any object or authorized to the local
+/// Device Description/active recipient only, and optionally `ReinitializeDevice`,
+/// `AtomicReadFile` and `AtomicWriteFile`, plus `Reject`/`Abort`. Inbound transactions reuse the
 /// wire invoke ID directly and NEVER allocate from the shared outbound
 /// client ID pool, so equal inbound/outbound numeric IDs stay unambiguous
 /// via the ingress classifier + coordinator admission.
@@ -75,6 +89,7 @@ pub struct EndpointResponder {
     egress: EndpointEgress,
     open: AtomicBool,
     device_writes: Option<(ObjectIdentifier, MutationAuthorizer)>,
+    writes: bool,
     reinitialize: Option<(ReinitializeHandler, Option<String>)>,
     file_reads: Option<AtomicReadFileBudget>,
     file_writes: Option<AtomicWriteFileBudget>,
@@ -89,6 +104,7 @@ impl EndpointResponder {
             egress,
             open: AtomicBool::new(true),
             device_writes: None,
+            writes: false,
             reinitialize: None,
             file_reads: None,
             file_writes: None,
@@ -115,6 +131,13 @@ impl EndpointResponder {
         authorizer: MutationAuthorizer,
     ) -> Self {
         self.device_writes = Some((device, authorizer));
+        self
+    }
+
+    /// Serve WriteProperty to any object, as each object's write access allows.
+    #[doc(hidden)]
+    pub fn with_writes(mut self) -> Self {
+        self.writes = true;
         self
     }
 
@@ -145,7 +168,7 @@ impl EndpointResponder {
 
     fn execution(&self) -> DeviceExecution {
         DeviceExecution::Endpoint {
-            writes: self.device_writes.is_some(),
+            writes: self.device_writes.is_some() || self.writes,
             reinitialize: self.reinitialize.is_some(),
             file_reads: self.file_reads.is_some(),
             file_writes: self.file_writes.is_some(),
@@ -241,6 +264,35 @@ impl EndpointResponder {
         }
     }
 
+    /// No Device is correlated with the sender, so the command origin is its address alone.
+    async fn write_property(
+        &self,
+        request: &ConfirmedRequestPdu,
+        received: &ReceivedApdu,
+    ) -> Result<(), Error> {
+        let address = source_address(received);
+        let source = bacnet_objects::device::AuditWriteSource {
+            device: bacnet_types::constructed::BACnetRecipient::Address(address.clone()),
+            invoke_id: request.invoke_id,
+        };
+        let origin = bacnet_objects::command_source::CommandOrigin::Remote {
+            actual_address: address,
+            binding: bacnet_objects::command_source::CommandDeviceBinding::Unknown,
+        };
+        let mut db = self.db.write().await;
+        if !self.open.load(Ordering::Acquire) {
+            return Err(shutdown_error());
+        }
+        handlers::handle_write_property_observed(
+            &mut db,
+            &request.service_request,
+            None,
+            Some(&source),
+            Some(&origin),
+        )
+        .map(|_| ())
+    }
+
     /// Handles one inbound request, preserving provenance structurally.
     ///
     /// Direct provenance or any supplied capability selects checked original-socket
@@ -316,6 +368,18 @@ impl EndpointResponder {
                 budget,
                 |_, _, _| {},
             )
+        } else if request.service_choice == ConfirmedServiceChoice::WRITE_PROPERTY && self.writes {
+            match self.write_property(&request, &received).await {
+                Ok(()) => Apdu::SimpleAck(SimpleAck {
+                    invoke_id,
+                    service_choice: request.service_choice,
+                }),
+                Err(error) => confirmed_response::error_apdu_from_error(
+                    invoke_id,
+                    request.service_choice,
+                    &error,
+                ),
+            }
         } else if request.service_choice == ConfirmedServiceChoice::WRITE_PROPERTY
             && self.device_writes.is_some()
         {
