@@ -88,6 +88,8 @@ pub struct ServerConfig {
     /// with [`Error::Protocol`]: a panic or an [`Error::Reject`] is answered
     /// SERVICES / OTHER.
     pub on_reinitialize: Option<ReinitializeHandler>,
+    /// Called for each property a peer's WriteProperty or WritePropertyMultiple changed.
+    pub on_property_written: Option<PropertyWriteObserver>,
     /// Local mutation authorization mode (default: permissive). SC mTLS channel/peer
     /// authentication is not service authorization; addresses here are claimed,
     /// never certificate principals. See [`MutationPolicy`]. Each decision also
@@ -226,6 +228,10 @@ impl std::fmt::Debug for ServerConfig {
                 &self.on_reinitialize.as_ref().map(|_| "<callback>"),
             )
             .field(
+                "on_property_written",
+                &self.on_property_written.as_ref().map(|_| "<callback>"),
+            )
+            .field(
                 "mutation_authorizer",
                 &self.mutation_authorizer.as_ref().map(|_| "<callback>"),
             )
@@ -295,6 +301,7 @@ impl Default for ServerConfig {
             time_sync_policy: TimeSyncPolicy::default(),
             on_time_sync: None,
             on_reinitialize: None,
+            on_property_written: None,
             mutation_policy: MutationPolicy::default(),
             mutation_authorizer: None,
             life_safety_operation_authorizer: None,

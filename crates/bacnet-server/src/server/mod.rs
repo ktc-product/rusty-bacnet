@@ -135,6 +135,8 @@ pub struct TimeSyncData {
 
 mod config;
 pub use config::ServerConfig;
+mod property_write;
+pub use property_write::{PropertyWriteData, PropertyWriteObserver};
 mod audit_batch_queue;
 mod audit_batch_runtime;
 mod audit_context_preparation;

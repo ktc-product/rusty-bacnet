@@ -93,6 +93,7 @@ pub struct EndpointResponder {
     open: AtomicBool,
     device_writes: Option<(ObjectIdentifier, MutationAuthorizer)>,
     writes: bool,
+    write_observer: Option<super::super::PropertyWriteObserver>,
     reinitialize: Option<(ReinitializeHandler, Option<String>)>,
     file_reads: Option<AtomicReadFileBudget>,
     file_writes: Option<AtomicWriteFileBudget>,
@@ -121,6 +122,7 @@ impl EndpointResponder {
             open: AtomicBool::new(true),
             device_writes: None,
             writes: false,
+            write_observer: None,
             reinitialize: None,
             file_reads: None,
             file_writes: None,
@@ -170,6 +172,13 @@ impl EndpointResponder {
     #[doc(hidden)]
     pub fn with_writes(mut self) -> Self {
         self.writes = true;
+        self
+    }
+
+    /// Install the observer told about each property WriteProperty changed.
+    #[doc(hidden)]
+    pub fn with_write_observer(mut self, observer: super::super::PropertyWriteObserver) -> Self {
+        self.write_observer = Some(observer);
         self
     }
 
@@ -321,17 +330,24 @@ impl EndpointResponder {
             actual_address: address,
             binding: bacnet_objects::command_source::CommandDeviceBinding::Unknown,
         };
-        let mut db = self.db().write().await;
-        // Close may win while this request waits for the database owner.
-        self.ensure_open()?;
-        handlers::handle_write_property_observed(
-            &mut db,
-            &request.service_request,
-            None,
-            Some(&source),
-            Some(&origin),
-        )
-        .map(|_| ())
+        let mut recording = super::super::property_write::RecordingObserver::new(None);
+        let result = {
+            let mut db = self.db().write().await;
+            // Close may win while this request waits for the database owner.
+            self.ensure_open()?;
+            handlers::handle_write_property_observed(
+                &mut db,
+                &request.service_request,
+                Some(&mut recording),
+                Some(&source),
+                Some(&origin),
+            )
+        };
+        super::super::property_write::report(
+            self.write_observer.as_ref(),
+            recording.into_written(),
+        );
+        result.map(|_| ())
     }
 
     /// Handles one inbound request, preserving provenance structurally.

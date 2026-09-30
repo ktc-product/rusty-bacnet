@@ -46,6 +46,20 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Calls `observer` for each property a peer's WriteProperty changed. Startup requires
+    /// [`with_writes`](Self::with_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_write_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(bacnet_server::server::PropertyWriteData) + Send + Sync + 'static,
+    {
+        self.assert_configurable();
+        self.write_observer = Some(Arc::new(observer));
+        self
+    }
+
     /// Enables ReinitializeDevice, carried out by `handler` with the
     /// requester's [`ReinitializeContext`] and the database write-locked.
     ///
@@ -147,6 +161,11 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         if self.writes && writes {
             return Err(Error::Encoding(
                 "WriteProperty to any object and Device writes are exclusive".into(),
+            ));
+        }
+        if self.write_observer.is_some() && !self.writes {
+            return Err(Error::Encoding(
+                "a write observer requires WriteProperty to any object".into(),
             ));
         }
         // Names the enabled capabilities that need the Device.

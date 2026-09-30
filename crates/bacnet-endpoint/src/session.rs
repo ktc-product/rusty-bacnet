@@ -292,6 +292,7 @@ pub struct EndpointSession<T: TransportPort + 'static> {
     pub(crate) file_reads: bool,
     pub(crate) file_writes: bool,
     pub(crate) writes: bool,
+    pub(crate) write_observer: Option<bacnet_server::server::PropertyWriteObserver>,
     egress: Option<bacnet_endpoint_core::endpoint_ingress::EndpointEgress>,
 }
 
@@ -400,6 +401,7 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             file_reads: false,
             file_writes: false,
             writes: false,
+            write_observer: None,
             egress: None,
         })
     }
