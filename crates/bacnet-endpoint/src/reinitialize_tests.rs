@@ -374,7 +374,7 @@ async fn a_password_over_twenty_characters_is_refused() {
 /// the session method that enables it.
 #[test]
 fn the_responder_lists_match_what_each_session_executes() {
-    let session = |writes: bool, reinitialize: bool| {
+    let session = |writes: bool, reinitialize: bool, files_and_multiple_reads: bool| {
         let (transport, _peer) = LoopbackTransport::pair(vec![0x01], vec![0x02]);
         let mut session =
             EndpointSession::new(transport, SessionRole::ServerOnly, SessionConfig::default())
@@ -386,9 +386,15 @@ fn the_responder_lists_match_what_each_session_executes() {
             session =
                 session.with_reinitialize(|_: &ReinitializeContext, _: &mut ObjectDatabase| Ok(()));
         }
+        if files_and_multiple_reads {
+            session = session
+                .with_file_reads()
+                .with_file_writes()
+                .with_multiple_reads();
+        }
         session.executed_services()
     };
-    assert_eq!(session(false, false), RESPONDER_SERVICES);
+    assert_eq!(session(false, false, false), RESPONDER_SERVICES);
     let all: Vec<_> = RESPONDER_SERVICES
         .iter()
         .copied()
@@ -398,12 +404,21 @@ fn the_responder_lists_match_what_each_session_executes() {
                 .map(|opt_in| opt_in.service),
         )
         .collect();
-    assert_eq!(session(true, true), all);
+    assert_eq!(session(true, true, true), all);
     assert_eq!(
-        session(true, false),
+        session(true, false, false),
         [
             ServiceSupported::READ_PROPERTY,
             ServiceSupported::WRITE_PROPERTY
+        ]
+    );
+    assert_eq!(
+        session(false, false, true),
+        [
+            ServiceSupported::READ_PROPERTY,
+            ServiceSupported::ATOMIC_READ_FILE,
+            ServiceSupported::ATOMIC_WRITE_FILE,
+            ServiceSupported::READ_PROPERTY_MULTIPLE
         ]
     );
 

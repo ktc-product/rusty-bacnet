@@ -117,6 +117,9 @@ fn the_view_rows_answer_shapes_and_writability_as_its_old_overrides_did() {
         DeviceExecution::Endpoint {
             writes: true,
             reinitialize: true,
+            file_reads: true,
+            file_writes: true,
+            multiple_reads: true,
         },
     ] {
         for identity in [None, Some(&identity)] {

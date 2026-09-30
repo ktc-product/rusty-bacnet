@@ -493,7 +493,7 @@
     {
       "bit": 6,
       "clientSends": true,
-      "endpoint": null,
+      "endpoint": "with_file_reads",
       "kind": "confirmed",
       "label": "AtomicReadFile",
       "name": "ATOMIC_READ_FILE",
@@ -504,7 +504,7 @@
     {
       "bit": 7,
       "clientSends": true,
-      "endpoint": null,
+      "endpoint": "with_file_writes",
       "kind": "confirmed",
       "label": "AtomicWriteFile",
       "name": "ATOMIC_WRITE_FILE",
@@ -680,7 +680,7 @@
     {
       "bit": 14,
       "clientSends": true,
-      "endpoint": null,
+      "endpoint": "with_multiple_reads",
       "kind": "confirmed",
       "label": "ReadPropertyMultiple",
       "name": "READ_PROPERTY_MULTIPLE",

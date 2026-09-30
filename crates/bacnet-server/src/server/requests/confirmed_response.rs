@@ -4,13 +4,12 @@ use bacnet_device_core::cov::active::LiveDeviceCov;
 use bacnet_device_core::read::{self, LiveLists, ReadFailure, ReadScope};
 use bacnet_services::read_property::ReadPropertyRequest;
 
-/// ReadProperty under the narrow responder's actual RP[/WP/ReinitializeDevice] execution
-/// profile, within the responder's configured read work limit.
+/// ReadProperty under the narrow responder's execution profile, within the responder's
+/// configured read work limit.
 pub(super) async fn read_property_response(
     db: &RwLock<ObjectDatabase>,
     request: &ConfirmedRequestPdu,
-    writes: bool,
-    reinitialize: bool,
+    execution: DeviceExecution,
     registered_port: Option<ObjectIdentifier>,
     work_limit: usize,
     identity: Option<&bacnet_objects::DeviceIdentity>,
@@ -19,10 +18,7 @@ pub(super) async fn read_property_response(
         db,
         None,
         ReadProfile {
-            execution: DeviceExecution::Endpoint {
-                writes,
-                reinitialize,
-            },
+            execution,
             registered_port,
             work_limit,
             identity,
@@ -139,6 +135,72 @@ pub(super) struct ReadProfile<'a> {
     pub(super) registered_port: Option<ObjectIdentifier>,
     pub(super) work_limit: usize,
     pub(super) identity: Option<&'a bacnet_objects::DeviceIdentity>,
+}
+
+/// ReadPropertyMultiple under the narrow responder's execution profile, within `budget`. The
+/// responder keeps no COV subscriptions, so no live COV projection is read.
+pub(super) async fn read_property_multiple_response(
+    db: &RwLock<ObjectDatabase>,
+    request: &ConfirmedRequestPdu,
+    execution: DeviceExecution,
+    registered_port: Option<ObjectIdentifier>,
+    identity: Option<&bacnet_objects::DeviceIdentity>,
+    budget: read::ReadPropertyMultipleBudget,
+) -> Apdu {
+    let invoke_id = request.invoke_id;
+    let service_choice = request.service_choice;
+    let mut service_ack = BytesMut::with_capacity(512);
+    let db = db.read().await;
+    let result =
+        bacnet_services::rpm::ReadPropertyMultipleRequest::decode(&request.service_request)
+            .map_err(|error| ReadFailure::Service(error.into_request_reject()))
+            .and_then(|decoded| {
+                let view = DeviceReadContext::new(&db, execution).with_identity(identity);
+                let scope = ReadScope {
+                    work_limit: budget.max_result_elements,
+                    registered_port,
+                    device: view.device_oid(),
+                };
+                read::RpmPlan::new(
+                    &db,
+                    &scope,
+                    Some(&view),
+                    &decoded,
+                    budget.max_result_elements,
+                )?
+                .read(
+                    &db,
+                    Some(&view),
+                    &mut service_ack,
+                    budget.max_service_ack_bytes,
+                    |_, _, _, _| {},
+                )
+            });
+    match result {
+        Ok(()) => Apdu::ComplexAck(ComplexAck {
+            segmented: false,
+            more_follows: false,
+            invoke_id,
+            sequence_number: None,
+            proposed_window_size: None,
+            service_choice,
+            service_ack: service_ack.freeze(),
+        }),
+        Err(ReadFailure::Service(error)) => {
+            bacnet_device_core::reply::error_apdu(invoke_id, service_choice, &error)
+        }
+        Err(ReadFailure::Bytes) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::BUFFER_OVERFLOW,
+        }),
+        // Past the work limit.
+        Err(_) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::OUT_OF_RESOURCES,
+        }),
+    }
 }
 
 /// ReadProperty under one database read guard, planned before any table is

@@ -147,6 +147,8 @@ pub use config::ServerConfig;
 mod object_type_registry;
 pub use object_type_registry::ObjectTypeRegistry;
 pub(crate) use object_type_registry::construct as construct_registered_object;
+mod property_write;
+pub use property_write::{PropertyWriteData, PropertyWriteObserver};
 mod audit_batch_queue;
 mod audit_batch_runtime;
 mod audit_context_preparation;

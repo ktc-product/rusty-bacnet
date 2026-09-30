@@ -138,6 +138,16 @@ pub fn write_property_multiple(
             }
             if let Some(observer) = observer.as_deref_mut() {
                 observer.applied(db, oid);
+                observer.written(
+                    db,
+                    WriteTarget {
+                        oid,
+                        property,
+                        array_index: reference.property_array_index,
+                        priority: attempt.priority,
+                        value: &attempt.value,
+                    },
+                );
             }
             wrote = true;
             if !committed_oids.contains(&oid) {
