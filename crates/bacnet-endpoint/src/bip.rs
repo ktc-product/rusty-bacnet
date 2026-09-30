@@ -72,6 +72,7 @@ pub struct BipEndpointBuilder {
     reinit_password: Option<String>,
     file_reads: bool,
     file_writes: bool,
+    writes: bool,
     source_audit_bindings: Vec<(ObjectIdentifier, SocketAddrV4)>,
     bbmd_bdt: Option<Vec<BdtEntry>>,
     foreign_policy: Option<ForeignDevicePolicy>,
@@ -104,6 +105,7 @@ impl BipEndpointBuilder {
             reinit_password: None,
             file_reads: false,
             file_writes: false,
+            writes: false,
             source_audit_bindings: Vec::new(),
             bbmd_bdt: None,
             foreign_policy: None,
@@ -244,6 +246,13 @@ impl BipEndpointBuilder {
         self
     }
 
+    /// Enables WriteProperty to any object. See [`EndpointSession::with_writes`].
+    /// Requires `build_session()`.
+    pub fn writes(mut self) -> Self {
+        self.writes = true;
+        self
+    }
+
     /// Register one trusted direct IPv4 B/IP route for source Audit delivery.
     /// This is route data only; provision the recipient on the actual Device.
     /// Multiple entries may resolve old/new Device choices. Duplicate keys,
@@ -355,6 +364,11 @@ impl BipEndpointBuilder {
                 "AtomicWriteFile requires build_session()".into(),
             ));
         }
+        if self.writes {
+            return Err(Error::Encoding(
+                "WriteProperty requires build_session()".into(),
+            ));
+        }
         if !self.source_audit_bindings.is_empty() {
             return Err(Error::Encoding(
                 "source Audit route data requires build_session()".into(),
@@ -412,6 +426,7 @@ impl BipEndpointBuilder {
         let reinit_password = self.reinit_password.take();
         let file_reads = std::mem::take(&mut self.file_reads);
         let file_writes = std::mem::take(&mut self.file_writes);
+        let writes = std::mem::take(&mut self.writes);
         let bindings = std::mem::take(&mut self.source_audit_bindings);
         crate::source_audit::recipient::SourceRoutes::new(
             &bindings,
@@ -440,6 +455,7 @@ impl BipEndpointBuilder {
         endpoint.reinit_password = reinit_password;
         endpoint.file_reads = file_reads;
         endpoint.file_writes = file_writes;
+        endpoint.writes = writes;
         endpoint.source_audit_bindings = bindings;
         Ok(endpoint)
     }

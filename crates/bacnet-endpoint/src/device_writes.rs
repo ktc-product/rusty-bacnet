@@ -32,6 +32,20 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables WriteProperty to any object in the attached database, as each object's write
+    /// access allows.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes), and startup refuses the two together.
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.writes = true;
+        self
+    }
+
     /// Enables ReinitializeDevice, carried out by `handler` with the
     /// requester's [`ReinitializeContext`] and the database write-locked.
     ///
@@ -107,7 +121,7 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     /// The services the responder executes with the capabilities enabled on this session.
     fn executed_services(&self) -> Vec<ServiceSupported> {
         let mut services = vec![ServiceSupported::READ_PROPERTY];
-        if self.device_write_authorizer.is_some() {
+        if self.device_write_authorizer.is_some() || self.writes {
             services.push(ServiceSupported::WRITE_PROPERTY);
         }
         if self.reinitialize.is_some() {
@@ -130,9 +144,15 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "a ReinitializeDevice password requires a ReinitializeDevice handler".into(),
             ));
         }
+        if self.writes && writes {
+            return Err(Error::Encoding(
+                "WriteProperty to any object and Device writes are exclusive".into(),
+            ));
+        }
         // Names the enabled capabilities that need the Device.
         let enabled: Vec<&str> = [
             (writes, "Device writes"),
+            (self.writes, "WriteProperty"),
             (reinitialize, "ReinitializeDevice"),
             (self.file_reads, "AtomicReadFile"),
             (self.file_writes, "AtomicWriteFile"),
