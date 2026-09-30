@@ -173,6 +173,30 @@ async fn recipient_direct_and_server_local_writes_use_the_same_owner() {
     }
 }
 
+/// The recipient path skips the ordinary write observer calls, so it reports on its own.
+#[tokio::test]
+async fn recipient_wire_change_is_reported_to_the_property_write_observer() {
+    let mut fixture = fixture(reporter()).await;
+    let reported = Arc::new(StdMutex::new(Vec::new()));
+    let sink = Arc::clone(&reported);
+    fixture.server.config.on_property_written =
+        Some(Arc::new(move |write| sink.lock().unwrap().push(write)));
+
+    assert!(matches!(
+        change(&fixture, &device(21)).await,
+        Apdu::SimpleAck(_)
+    ));
+
+    let reported = reported.lock().unwrap().clone();
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].object_identifier, oid(ObjectType::DEVICE, 10));
+    assert_eq!(
+        reported[0].property_identifier,
+        PropertyIdentifier::AUDIT_NOTIFICATION_RECIPIENT
+    );
+    fixture.server.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn recipient_second_reservation_failure_and_noops_are_atomic() {
     let mut fixture = fixture(reporter()).await;

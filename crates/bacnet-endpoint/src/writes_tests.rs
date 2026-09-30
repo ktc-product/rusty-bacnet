@@ -26,6 +26,17 @@ async fn writing_endpoint() -> (
     bacnet_client::client::BACnetClient<bacnet_transport::bip::BipTransport>,
     [u8; 6],
 ) {
+    writing_endpoint_with(|builder| builder).await
+}
+
+/// The same, with `configure` applied to the builder before the session is built.
+async fn writing_endpoint_with(
+    configure: impl FnOnce(crate::bip::BipEndpointBuilder) -> crate::bip::BipEndpointBuilder,
+) -> (
+    EndpointSession<bacnet_transport::bip::BipTransport>,
+    bacnet_client::client::BACnetClient<bacnet_transport::bip::BipTransport>,
+    [u8; 6],
+) {
     let reservation = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
@@ -62,14 +73,13 @@ async fn writing_endpoint() -> (
     ];
     let db = crate::identity::build_database_with_extra(&identity, objects).unwrap();
 
-    let mut endpoint =
+    let builder =
         crate::bip::BipEndpointBuilder::new(Ipv4Addr::LOCALHOST, port, Ipv4Addr::BROADCAST)
             .role(SessionRole::ServerOnly)
             .database(db)
             .identity(identity)
-            .writes()
-            .build_session()
-            .unwrap();
+            .writes();
+    let mut endpoint = configure(builder).build_session().unwrap();
     endpoint.start().await.unwrap();
 
     let client = bacnet_client::client::BACnetClient::bip_builder()
@@ -227,6 +237,69 @@ async fn write_property_to_a_missing_object_is_an_unknown_object() {
 
     client.stop().await.unwrap();
     endpoint.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn write_property_is_reported_to_the_write_observer() {
+    let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reported);
+    let (mut endpoint, mut client, mac) = writing_endpoint_with(|builder| {
+        builder.write_observer(move |write| sink.lock().unwrap().push(write))
+    })
+    .await;
+
+    client
+        .write_property(
+            &mac,
+            analog_value(3),
+            PropertyIdentifier::PRESENT_VALUE,
+            None,
+            encoded(WRITTEN),
+            Some(8),
+        )
+        .await
+        .unwrap();
+    client
+        .write_property(
+            &mac,
+            analog_value(2),
+            PropertyIdentifier::PRESENT_VALUE,
+            None,
+            encoded(WRITTEN),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        *reported.lock().unwrap(),
+        vec![bacnet_server::server::PropertyWriteData {
+            object_identifier: analog_value(3),
+            property_identifier: PropertyIdentifier::PRESENT_VALUE,
+            property_array_index: None,
+            value: PropertyValue::Real(WRITTEN),
+            priority: Some(8),
+        }],
+        "only the write that took effect is reported"
+    );
+
+    client.stop().await.unwrap();
+    endpoint.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_write_observer_needs_writes() {
+    let (transport, _peer) = LoopbackTransport::pair(vec![0x01], vec![0x02]);
+    let identity = crate::DeviceIdentity::new(123, 42).unwrap();
+    let db = crate::identity::build_database_with_extra(&identity, vec![]).unwrap();
+    let mut session =
+        EndpointSession::new(transport, SessionRole::ServerOnly, SessionConfig::default())
+            .unwrap()
+            .with_database(db)
+            .with_identity(identity)
+            .with_write_observer(|_| {});
+
+    assert!(session.start().await.is_err());
 }
 
 #[tokio::test]

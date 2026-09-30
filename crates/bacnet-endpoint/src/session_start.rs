@@ -76,6 +76,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 if self.writes {
                     responder = responder.with_writes();
                 }
+                if let Some(observer) = self.write_observer.clone() {
+                    responder = responder.with_write_observer(observer);
+                }
                 if let Some(handler) = self.reinitialize.clone() {
                     responder = responder.with_reinitialize(handler, self.reinit_password.clone());
                 }

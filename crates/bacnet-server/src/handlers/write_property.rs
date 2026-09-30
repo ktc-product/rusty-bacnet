@@ -25,6 +25,9 @@ pub(crate) trait WriteCommitObserver: Send {
     fn committed(&mut self, db: &mut ObjectDatabase);
     /// Execution returned an error after `before`; never called for authorization denial.
     fn failed(&mut self, db: &mut ObjectDatabase, error: &Error);
+    /// Called for every write that took effect, including Audit_Notification_Recipient
+    /// writes, which skip `before` and `committed`.
+    fn written(&mut self, _write: WriteTarget<'_>) {}
 }
 
 /// Validate database-owned Object_Name uniqueness before mutation.
@@ -193,6 +196,15 @@ pub(crate) fn handle_write_property_multiple_observed(
                     ) {
                         return semantic_failure(error, reference, committed_oids);
                     }
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.written(WriteTarget {
+                            oid,
+                            property,
+                            array_index: reference.property_array_index,
+                            priority: attempt.priority,
+                            value: &attempt.value,
+                        });
+                    }
                     if !committed_oids.contains(&oid) {
                         committed_oids.push(oid);
                     }
@@ -236,6 +248,7 @@ pub(crate) fn handle_write_property_multiple_observed(
         }
         if let Some(observer) = observer.as_deref_mut() {
             observer.committed(db);
+            observer.written(target);
         }
         if !committed_oids.contains(&oid) {
             committed_oids.push(oid);
@@ -473,6 +486,15 @@ pub(crate) fn handle_write_property_observed(
                     request.priority,
                     source,
                 )?;
+                if let Some(observer) = observer {
+                    observer.written(WriteTarget {
+                        oid,
+                        property: request.property_identifier,
+                        array_index: request.property_array_index,
+                        priority: request.priority,
+                        value: &request.property_value,
+                    });
+                }
                 return Ok(oid);
             }
         }
@@ -512,6 +534,7 @@ pub(crate) fn handle_write_property_observed(
     }
     if let Some(observer) = observer {
         observer.committed(db);
+        observer.written(target);
     }
     Ok(oid)
 }

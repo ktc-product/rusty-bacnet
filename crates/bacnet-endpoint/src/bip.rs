@@ -72,6 +72,7 @@ pub struct BipEndpointBuilder {
     file_reads: bool,
     file_writes: bool,
     writes: bool,
+    write_observer: Option<bacnet_server::server::PropertyWriteObserver>,
     source_audit_bindings: Vec<(ObjectIdentifier, SocketAddrV4)>,
     bbmd_bdt: Option<Vec<BdtEntry>>,
     foreign_policy: Option<ForeignDevicePolicy>,
@@ -103,6 +104,7 @@ impl BipEndpointBuilder {
             file_reads: false,
             file_writes: false,
             writes: false,
+            write_observer: None,
             source_audit_bindings: Vec::new(),
             bbmd_bdt: None,
             foreign_policy: None,
@@ -213,6 +215,15 @@ impl BipEndpointBuilder {
     /// Requires `build_session()`.
     pub fn writes(mut self) -> Self {
         self.writes = true;
+        self
+    }
+
+    /// See [`EndpointSession::with_write_observer`]. Requires `build_session()`.
+    pub fn write_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(bacnet_server::server::PropertyWriteData) + Send + Sync + 'static,
+    {
+        self.write_observer = Some(std::sync::Arc::new(observer));
         self
     }
 
@@ -330,6 +341,11 @@ impl BipEndpointBuilder {
                 "WriteProperty requires build_session()".into(),
             ));
         }
+        if self.write_observer.is_some() {
+            return Err(Error::Encoding(
+                "a write observer requires build_session()".into(),
+            ));
+        }
         if !self.source_audit_bindings.is_empty() {
             return Err(Error::Encoding(
                 "source Audit route data requires build_session()".into(),
@@ -386,6 +402,7 @@ impl BipEndpointBuilder {
         let file_reads = std::mem::take(&mut self.file_reads);
         let file_writes = std::mem::take(&mut self.file_writes);
         let writes = std::mem::take(&mut self.writes);
+        let write_observer = self.write_observer.take();
         let bindings = std::mem::take(&mut self.source_audit_bindings);
         crate::source_audit::recipient::SourceRoutes::new(
             &bindings,
@@ -415,6 +432,7 @@ impl BipEndpointBuilder {
         endpoint.file_reads = file_reads;
         endpoint.file_writes = file_writes;
         endpoint.writes = writes;
+        endpoint.write_observer = write_observer;
         endpoint.source_audit_bindings = bindings;
         Ok(endpoint)
     }

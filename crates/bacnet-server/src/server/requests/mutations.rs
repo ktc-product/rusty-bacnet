@@ -125,20 +125,22 @@ impl Request<'_> {
         }) {
             return self.error::<T>(&error);
         }
-        let (result, exact_changes, plans) = {
+        let (result, exact_changes, plans, written) = {
             let mut db = db.write().await;
             let snapshots = crate::life_safety_cov::LifeSafetyCovSnapshots::capture_write_property(
                 &db,
                 &self.req.service_request,
             );
             let source = audit.write_source();
+            let mut recording = super::super::property_write::RecordingObserver::new(Some(audit));
             let result = handlers::handle_write_property_observed(
                 &mut db,
                 &self.req.service_request,
-                Some(audit),
+                Some(&mut recording),
                 Some(&source),
                 self.command_origin,
             );
+            let written = recording.into_written();
             let changes = result
                 .as_ref()
                 .map(|oid| snapshots.changes(&db, std::slice::from_ref(oid)))
@@ -151,8 +153,9 @@ impl Request<'_> {
                 let capture = cov_table.read().await.timed_capture(*oid);
                 capture.run(&db);
             }
-            (result, changes, plans)
+            (result, changes, plans, written)
         };
+        super::super::property_write::report(self.config.on_property_written.as_ref(), written);
         staging_plans.extend(plans);
         match result {
             Ok(oid) => {
@@ -180,22 +183,24 @@ impl Request<'_> {
             life_safety_cov_changes,
             staging_plans,
         } = effects;
-        let (outcome, exact_changes, plans) = {
+        let (outcome, exact_changes, plans, written) = {
             let mut db = db.write().await;
             let mut snapshots = crate::life_safety_cov::LifeSafetyCovSnapshots::default();
             let authorize = |attempt: &bacnet_services::wpm::WritePropertyAttempt| {
                 self.authorize(|| Ok(MutationTarget::WritePropertyMultiple(attempt.clone())))
             };
             let source = audit.write_source();
+            let mut recording = super::super::property_write::RecordingObserver::new(Some(audit));
             let outcome = handlers::handle_write_property_multiple_observed(
                 &mut db,
                 &self.req.service_request,
                 &mut snapshots,
                 Some(&authorize),
-                Some(audit),
+                Some(&mut recording),
                 Some(&source),
                 self.command_origin,
             );
+            let written = recording.into_written();
             let committed_oids = match &outcome {
                 handlers::WritePropertyMultipleOutcome::Success { committed_oids }
                 | handlers::WritePropertyMultipleOutcome::Error { committed_oids, .. } => {
@@ -205,8 +210,9 @@ impl Request<'_> {
             };
             let changes = snapshots.changes(&db, committed_oids);
             let plans = BACnetServer::<T>::take_staging_plans(&mut db, committed_oids);
-            (outcome, changes, plans)
+            (outcome, changes, plans, written)
         };
+        super::super::property_write::report(self.config.on_property_written.as_ref(), written);
         staging_plans.extend(plans);
         let response = match outcome {
             handlers::WritePropertyMultipleOutcome::Success { committed_oids } => {
