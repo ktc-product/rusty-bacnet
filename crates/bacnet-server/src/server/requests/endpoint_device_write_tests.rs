@@ -709,3 +709,6 @@ async fn endpoint_refuses_a_channel_present_value_write_and_starts_no_distributi
 
 #[path = "endpoint_description_close_tests.rs"]
 mod description_close;
+
+#[path = "endpoint_any_object_write_tests.rs"]
+mod any_object_write;

@@ -516,3 +516,15 @@ mod device_profiles;
 
 #[path = "device_description_kept_tests.rs"]
 mod device_description;
+
+#[path = "file_reads_tests.rs"]
+mod file_reads;
+
+#[path = "file_writes_tests.rs"]
+mod file_writes;
+
+#[path = "writes_tests.rs"]
+mod writes;
+
+#[path = "multiple_reads_tests.rs"]
+mod multiple_reads;

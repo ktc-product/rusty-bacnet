@@ -46,6 +46,18 @@ pub const RESPONDER_OPT_IN_SERVICES: &[ResponderOptIn] = &[
         service: ServiceSupported::SUBSCRIBE_COV_PROPERTY_MULTIPLE,
         method: "with_cov",
     },
+    ResponderOptIn {
+        service: ServiceSupported::ATOMIC_READ_FILE,
+        method: "with_file_reads",
+    },
+    ResponderOptIn {
+        service: ServiceSupported::ATOMIC_WRITE_FILE,
+        method: "with_file_writes",
+    },
+    ResponderOptIn {
+        service: ServiceSupported::READ_PROPERTY_MULTIPLE,
+        method: "with_multiple_reads",
+    },
 ];
 
 impl<T: TransportPort + 'static> EndpointSession<T> {
@@ -82,6 +94,34 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     pub fn with_device_writes(mut self, authorizer: DeviceWriteAuthorizer) -> Self {
         self.assert_configurable();
         self.device_write_authorizer = Some(authorizer);
+        self
+    }
+
+    /// Enables WriteProperty to any object in the attached database, as each object's write
+    /// access allows.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes), and startup refuses the two together.
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.writes = true;
+        self
+    }
+
+    /// Calls `observer` for each property a peer's WriteProperty changed. Startup requires
+    /// [`with_writes`](Self::with_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_write_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(bacnet_server::server::PropertyWriteData) + Send + Sync + 'static,
+    {
+        self.assert_configurable();
+        self.write_observer = Some(Arc::new(observer));
         self
     }
 
@@ -221,6 +261,46 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables AtomicReadFile for the File objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.file_reads = true;
+        self
+    }
+
+    /// Enables AtomicWriteFile for the File objects in the attached database.
+    ///
+    /// A File's Read_Only property decides whether it accepts a write. Startup
+    /// requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.file_writes = true;
+        self
+    }
+
+    /// Enables ReadPropertyMultiple for the objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_multiple_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.multiple_reads = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// It takes effect only with [`with_reinitialize`](Self::with_reinitialize):
@@ -267,18 +347,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     /// this session: [`RESPONDER_SERVICES`], then each enabled entry of
     /// [`RESPONDER_OPT_IN_SERVICES`].
     pub(crate) fn executed_services(&self) -> Vec<ServiceSupported> {
-        let cov = |service| {
-            matches!(
-                service,
-                ServiceSupported::SUBSCRIBE_COV
-                    | ServiceSupported::SUBSCRIBE_COV_PROPERTY
-                    | ServiceSupported::SUBSCRIBE_COV_PROPERTY_MULTIPLE
-            )
-        };
-        let enabled = |service: ServiceSupported| {
-            (service == ServiceSupported::WRITE_PROPERTY && self.device_write_authorizer.is_some())
-                || (service == ServiceSupported::REINITIALIZE_DEVICE && self.reinitialize.is_some())
-                || (cov(service) && self.cov.config.is_some())
+        let enabled = |service: ServiceSupported| match service {
+            // `with_writes` serves WriteProperty to any object.
+            ServiceSupported::WRITE_PROPERTY => {
+                self.device_write_authorizer.is_some() || self.writes
+            }
+            ServiceSupported::REINITIALIZE_DEVICE => self.reinitialize.is_some(),
+            ServiceSupported::SUBSCRIBE_COV
+            | ServiceSupported::SUBSCRIBE_COV_PROPERTY
+            | ServiceSupported::SUBSCRIBE_COV_PROPERTY_MULTIPLE => self.cov.config.is_some(),
+            ServiceSupported::ATOMIC_READ_FILE => self.file_reads,
+            ServiceSupported::ATOMIC_WRITE_FILE => self.file_writes,
+            ServiceSupported::READ_PROPERTY_MULTIPLE => self.multiple_reads,
+            _ => false,
         };
         let opt_in = RESPONDER_OPT_IN_SERVICES
             .iter()
@@ -344,26 +425,48 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 bacnet_services::device_mgmt::MAX_PASSWORD_CHARS
             )));
         }
+        if self.writes && writes {
+            return Err(Error::Encoding(
+                "WriteProperty to any object and Device writes are exclusive".into(),
+            ));
+        }
+        if self.write_observer.is_some() && !self.writes {
+            return Err(Error::Encoding(
+                "a write observer requires WriteProperty to any object".into(),
+            ));
+        }
         // Names the enabled capabilities that need the Device.
-        let enabled: Vec<_> = [
+        let enabled: Vec<&str> = [
             (writes, "Device writes"),
+            (self.writes, "WriteProperty"),
             (reinitialize, "ReinitializeDevice"),
             // The three subscribe services, enabled together.
             (self.cov.config.is_some(), "COV"),
+            (self.file_reads, "AtomicReadFile"),
+            (self.file_writes, "AtomicWriteFile"),
+            (self.multiple_reads, "ReadPropertyMultiple"),
         ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect();
-        let capability = enabled.join(" and ");
-        let subject = match enabled[..] {
-            ["ReinitializeDevice"] | ["COV"] => format!("{capability} requires"),
-            _ => format!("{capability} require"),
-        };
-        if self.role == SessionRole::ClientOnly {
-            return if !enabled.is_empty() {
-                Err(Error::Encoding(format!("{subject} a server role")))
+        let capability = match enabled.as_slice() {
+            [] => None,
+            [only] => Some((*only).to_owned()),
+            [first @ .., last] => Some(format!("{} and {last}", first.join(", "))),
+        }
+        .map(|capability| {
+            let verb = if enabled == ["Device writes"] || enabled.len() > 1 {
+                "require"
             } else {
-                Ok(None)
+                "requires"
+            };
+            let subject = format!("{capability} {verb}");
+            (capability, subject)
+        });
+        if self.role == SessionRole::ClientOnly {
+            return match capability {
+                Some((_, subject)) => Err(Error::Encoding(format!("{subject} a server role"))),
+                None => Ok(None),
             };
         }
         let allowed = self.executed_services();
@@ -380,9 +483,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "Endpoint identity services do not match the responder's services".into(),
             ));
         }
-        if enabled.is_empty() {
+        let Some((capability, subject)) = capability else {
             return Ok(None);
-        }
+        };
         let db = self
             .database
             .as_mut()

@@ -372,7 +372,7 @@ async fn a_password_over_twenty_characters_is_refused() {
 /// the session method that enables it.
 #[test]
 fn the_responder_lists_match_what_each_session_executes() {
-    let session = |writes: bool, reinitialize: bool, cov: bool| {
+    let session = |writes: bool, reinitialize: bool, cov: bool, files_and_multiple_reads: bool| {
         let (transport, _peer) = LoopbackTransport::pair(vec![0x01], vec![0x02]);
         let mut session =
             EndpointSession::new(transport, SessionRole::ServerOnly, SessionConfig::default())
@@ -387,9 +387,15 @@ fn the_responder_lists_match_what_each_session_executes() {
         if cov {
             session = session.with_cov(bacnet_device_core::report::ReportConfig::default());
         }
+        if files_and_multiple_reads {
+            session = session
+                .with_file_reads()
+                .with_file_writes()
+                .with_multiple_reads();
+        }
         session.executed_services()
     };
-    assert_eq!(session(false, false, false), RESPONDER_SERVICES);
+    assert_eq!(session(false, false, false, false), RESPONDER_SERVICES);
     let all: Vec<_> = RESPONDER_SERVICES
         .iter()
         .copied()
@@ -399,21 +405,30 @@ fn the_responder_lists_match_what_each_session_executes() {
                 .map(|opt_in| opt_in.service),
         )
         .collect();
-    assert_eq!(session(true, true, true), all);
+    assert_eq!(session(true, true, true, true), all);
     assert_eq!(
-        session(true, false, false),
+        session(true, false, false, false),
         [
             ServiceSupported::READ_PROPERTY,
             ServiceSupported::WRITE_PROPERTY
         ]
     );
     assert_eq!(
-        session(false, false, true),
+        session(false, false, true, false),
         [
             ServiceSupported::READ_PROPERTY,
             ServiceSupported::SUBSCRIBE_COV,
             ServiceSupported::SUBSCRIBE_COV_PROPERTY,
             ServiceSupported::SUBSCRIBE_COV_PROPERTY_MULTIPLE
+        ]
+    );
+    assert_eq!(
+        session(false, false, false, true),
+        [
+            ServiceSupported::READ_PROPERTY,
+            ServiceSupported::ATOMIC_READ_FILE,
+            ServiceSupported::ATOMIC_WRITE_FILE,
+            ServiceSupported::READ_PROPERTY_MULTIPLE
         ]
     );
 

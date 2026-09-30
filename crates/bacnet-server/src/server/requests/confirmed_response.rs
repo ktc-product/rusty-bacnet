@@ -115,6 +115,78 @@ pub(super) struct ReadProfile<'a> {
     pub(super) cov: Option<&'a dyn crate::endpoint_cov::EndpointCov>,
 }
 
+/// ReadPropertyMultiple under the narrow responder's execution profile, within `budget`.
+/// The Device's COV lists come from `cov`, the session's COV reporting, when it has one.
+pub(super) async fn read_property_multiple_response(
+    db: &RwLock<ObjectDatabase>,
+    request: &ConfirmedRequestPdu,
+    execution: DeviceExecution,
+    registered_port: Option<ObjectIdentifier>,
+    identity: Option<&bacnet_objects::DeviceIdentity>,
+    cov: Option<&dyn crate::endpoint_cov::EndpointCov>,
+    budget: read::ReadPropertyMultipleBudget,
+) -> Apdu {
+    let invoke_id = request.invoke_id;
+    let service_choice = request.service_choice;
+    let mut service_ack = BytesMut::with_capacity(512);
+    let db = db.read().await;
+    let result =
+        bacnet_services::rpm::ReadPropertyMultipleRequest::decode(&request.service_request)
+            .map_err(|error| ReadFailure::Service(error.into_request_reject()))
+            .and_then(|decoded| {
+                let view = DeviceReadContext::new(&db, execution).with_identity(identity);
+                let scope = ReadScope {
+                    work_limit: budget.max_result_elements,
+                    registered_port,
+                    device: view.device_oid(),
+                };
+                let plan = read::RpmPlan::new(
+                    &db,
+                    &scope,
+                    Some(&view),
+                    &decoded,
+                    budget.max_result_elements,
+                )?;
+                let live = plan
+                    .live_lists(&db)
+                    .zip(cov)
+                    .map(|(selection, cov)| cov.live(&db, selection));
+                let view = view.with_live(live.as_ref());
+                plan.read(
+                    &db,
+                    Some(&view),
+                    &mut service_ack,
+                    budget.max_service_ack_bytes,
+                    |_, _, _, _| {},
+                )
+            });
+    match result {
+        Ok(()) => Apdu::ComplexAck(ComplexAck {
+            segmented: false,
+            more_follows: false,
+            invoke_id,
+            sequence_number: None,
+            proposed_window_size: None,
+            service_choice,
+            service_ack: service_ack.freeze(),
+        }),
+        Err(ReadFailure::Service(error)) => {
+            bacnet_device_core::reply::error_apdu(invoke_id, service_choice, &error)
+        }
+        Err(ReadFailure::Bytes) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::BUFFER_OVERFLOW,
+        }),
+        // Past the work limit.
+        Err(_) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::OUT_OF_RESOURCES,
+        }),
+    }
+}
+
 /// ReadProperty under one database read guard, planned before any table is
 /// sampled (#1213). A Group's Present_Value counts against `work_limit` as
 /// a ReadPropertyMultiple naming only it would, and a read past it is aborted

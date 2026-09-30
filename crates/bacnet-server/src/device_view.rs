@@ -59,6 +59,9 @@ impl EndpointServices {
     const WRITES: u8 = 1;
     const REINITIALIZE: u8 = 2;
     const COV: u8 = 4;
+    pub(crate) const FILE_READS: u8 = 8;
+    pub(crate) const FILE_WRITES: u8 = 16;
+    pub(crate) const MULTIPLE_READS: u8 = 32;
 
     /// WriteProperty, ReinitializeDevice, and with `cov` SubscribeCOV,
     /// SubscribeCOVProperty and SubscribeCOVPropertyMultiple (#2490), each
@@ -77,17 +80,18 @@ impl EndpointServices {
         Self(enabled)
     }
 
+    /// The same services, with `service` (AtomicReadFile, AtomicWriteFile or
+    /// ReadPropertyMultiple) added when its session enabled it.
+    pub(crate) fn with(self, service: u8, on: bool) -> Self {
+        if on { Self(self.0 | service) } else { self }
+    }
+
     fn has(self, service: u8) -> bool {
         self.0 & service != 0
     }
 }
 
 impl DeviceExecution {
-    /// An endpoint's responder's profile: see [`EndpointServices::new`].
-    pub(crate) fn endpoint(writes: bool, reinitialize: bool, cov: bool) -> Self {
-        Self::Endpoint(EndpointServices::new(writes, reinitialize, cov))
-    }
-
     pub(crate) fn services(self, clock: bool) -> impl Iterator<Item = ServiceSupported> {
         let services = match self {
             Self::FullServer => EXECUTED_SERVICES.to_vec(),
@@ -108,6 +112,15 @@ impl DeviceExecution {
                     services.push(ServiceSupported::SUBSCRIBE_COV);
                     services.push(ServiceSupported::SUBSCRIBE_COV_PROPERTY);
                     services.push(ServiceSupported::SUBSCRIBE_COV_PROPERTY_MULTIPLE);
+                }
+                if enabled.has(EndpointServices::FILE_READS) {
+                    services.push(ServiceSupported::ATOMIC_READ_FILE);
+                }
+                if enabled.has(EndpointServices::FILE_WRITES) {
+                    services.push(ServiceSupported::ATOMIC_WRITE_FILE);
+                }
+                if enabled.has(EndpointServices::MULTIPLE_READS) {
+                    services.push(ServiceSupported::READ_PROPERTY_MULTIPLE);
                 }
                 services
             }
