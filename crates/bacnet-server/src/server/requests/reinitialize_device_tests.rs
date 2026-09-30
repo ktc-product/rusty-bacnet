@@ -30,6 +30,14 @@ fn request_data(state: ReinitializedState, password: Option<&str>) -> Bytes {
 }
 
 async fn dispatch(service_request: Bytes, password: Option<&str>, initial: u8) -> Apdu {
+    let config = ServerConfig {
+        reinit_password: password.map(str::to_owned),
+        ..Default::default()
+    };
+    dispatch_with(service_request, config, initial).await
+}
+
+async fn dispatch_with(service_request: Bytes, config: ServerConfig, initial: u8) -> Apdu {
     let network = Arc::new(NetworkLayer::new(BipTransport::new(
         Ipv4Addr::LOCALHOST,
         0,
@@ -37,10 +45,6 @@ async fn dispatch(service_request: Bytes, password: Option<&str>, initial: u8) -
     )));
     let comm_state = Arc::new(AtomicU8::new(initial));
     let dcc_timer = Arc::new(Mutex::new(crate::server::dcc_timer::TimerSlot::default()));
-    let config = ServerConfig {
-        reinit_password: password.map(str::to_owned),
-        ..Default::default()
-    };
     let request = ConfirmedRequestPdu {
         segmented: false,
         more_follows: false,
@@ -120,6 +124,86 @@ async fn reinitialize_device_password_failure_precedes_refusal() {
             }
         }
     }
+}
+
+/// A handler that records each state it is asked for, and refuses with `refusal` if given.
+fn recording_config(
+    password: Option<&str>,
+    refusal: Option<(ErrorClass, ErrorCode)>,
+) -> (ServerConfig, Arc<std::sync::Mutex<Vec<ReinitializedState>>>) {
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&received);
+    let handler: ReinitializeHandler = Arc::new(move |state, _database: &mut ObjectDatabase| {
+        recorded.lock().unwrap().push(state);
+        match refusal {
+            None => Ok(()),
+            Some((class, code)) => Err(Error::Protocol {
+                class: class.to_raw() as u32,
+                code: code.to_raw() as u32,
+            }),
+        }
+    });
+    let config = ServerConfig {
+        reinit_password: password.map(str::to_owned),
+        on_reinitialize: Some(handler),
+        ..Default::default()
+    };
+    (config, received)
+}
+
+#[tokio::test(start_paused = true)]
+async fn reinitialize_device_passes_every_state_to_the_handler() {
+    for state in STATES {
+        let (config, received) = recording_config(Some("reinit-pw"), None);
+
+        let apdu = dispatch_with(request_data(state, Some("reinit-pw")), config, 0).await;
+
+        let Apdu::SimpleAck(ack) = apdu else {
+            panic!("expected SimpleACK, got {apdu:?}")
+        };
+        assert_eq!(ack.invoke_id, 42);
+        assert_eq!(
+            ack.service_choice,
+            ConfirmedServiceChoice::REINITIALIZE_DEVICE
+        );
+        assert_eq!(*received.lock().unwrap(), vec![state]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reinitialize_device_sends_the_handlers_error() {
+    let (config, _) = recording_config(
+        None,
+        Some((ErrorClass::DEVICE, ErrorCode::CONFIGURATION_IN_PROGRESS)),
+    );
+
+    assert_error(
+        dispatch_with(
+            request_data(ReinitializedState::START_BACKUP, None),
+            config,
+            0,
+        )
+        .await,
+        ErrorClass::DEVICE,
+        ErrorCode::CONFIGURATION_IN_PROGRESS,
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn reinitialize_device_password_failure_never_reaches_the_handler() {
+    let (config, received) = recording_config(Some("reinit-pw"), None);
+
+    assert_error(
+        dispatch_with(
+            request_data(ReinitializedState::START_BACKUP, Some("wrong")),
+            config,
+            0,
+        )
+        .await,
+        ErrorClass::SECURITY,
+        ErrorCode::PASSWORD_FAILURE,
+    );
+    assert!(received.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

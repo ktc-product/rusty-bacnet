@@ -462,3 +462,6 @@ async fn bip_device_write_authorized_round_trip_and_service_readback() {
 
 #[path = "device_execution_tests.rs"]
 mod execution;
+
+#[path = "reinitialize_tests.rs"]
+mod reinitialize;
