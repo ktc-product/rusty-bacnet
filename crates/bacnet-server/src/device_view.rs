@@ -21,6 +21,7 @@ pub(crate) enum DeviceExecution {
         writes: bool,
         reinitialize: bool,
         file_reads: bool,
+        file_writes: bool,
     },
 }
 
@@ -32,6 +33,7 @@ impl DeviceExecution {
                 writes,
                 reinitialize,
                 file_reads,
+                file_writes,
             } => {
                 let mut services = vec![ServiceSupported::READ_PROPERTY];
                 if writes {
@@ -42,6 +44,9 @@ impl DeviceExecution {
                 }
                 if file_reads {
                     services.push(ServiceSupported::ATOMIC_READ_FILE);
+                }
+                if file_writes {
+                    services.push(ServiceSupported::ATOMIC_WRITE_FILE);
                 }
                 services
             }

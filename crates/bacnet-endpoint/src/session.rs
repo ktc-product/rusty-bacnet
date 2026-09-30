@@ -249,6 +249,7 @@ pub struct EndpointSession<T: TransportPort + 'static> {
     pub(crate) reinitialize: Option<bacnet_server::server::ReinitializeHandler>,
     pub(crate) reinit_password: Option<String>,
     pub(crate) file_reads: bool,
+    pub(crate) file_writes: bool,
     egress: Option<bacnet_endpoint_core::endpoint_ingress::EndpointEgress>,
 }
 
@@ -341,6 +342,7 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             reinitialize: None,
             reinit_password: None,
             file_reads: false,
+            file_writes: false,
             egress: None,
         })
     }

@@ -59,6 +59,20 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables AtomicWriteFile for the File objects in the attached database.
+    ///
+    /// A File's Read_Only property decides whether it accepts a write. Startup
+    /// requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_writes(mut self) -> Self {
+        self.assert_configurable();
+        self.file_writes = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// # Panics
@@ -81,6 +95,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         if self.file_reads {
             services.push(ServiceSupported::ATOMIC_READ_FILE);
         }
+        if self.file_writes {
+            services.push(ServiceSupported::ATOMIC_WRITE_FILE);
+        }
         services
     }
 
@@ -99,6 +116,11 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "ReinitializeDevice requires",
             ),
             (self.file_reads, "AtomicReadFile", "AtomicReadFile requires"),
+            (
+                self.file_writes,
+                "AtomicWriteFile",
+                "AtomicWriteFile requires",
+            ),
         ]
         .into_iter()
         .find(|(enabled, ..)| *enabled)

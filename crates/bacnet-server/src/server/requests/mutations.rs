@@ -428,12 +428,12 @@ impl Request<'_> {
             return self.error::<T>(&error);
         }
         let mut db = db.write().await;
-        BACnetServer::<T>::atomic_write_file_response(
+        super::atomic_write_file::atomic_write_file_response(
             &mut db,
             self.req.invoke_id,
             &self.req.service_request,
             self.config.atomic_write_file_budget,
-            audit,
+            |db, target, result| audit.file_completed(db, target, result),
         )
     }
 
