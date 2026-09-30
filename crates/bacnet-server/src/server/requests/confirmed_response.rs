@@ -3,21 +3,17 @@ use crate::cov::active::{LiveCovSelection, LiveDeviceCov};
 use crate::device_view::{DeviceExecution, DeviceReadContext};
 use bacnet_services::read_property::ReadPropertyRequest;
 
-/// ReadProperty under the narrow responder's actual RP[/WP][/ReinitializeDevice] execution profile.
+/// ReadProperty under the narrow responder's execution profile.
 pub(super) async fn read_property_response(
     db: &RwLock<ObjectDatabase>,
     request: &ConfirmedRequestPdu,
-    writes: bool,
-    reinitialize: bool,
+    execution: DeviceExecution,
     registered_port: Option<ObjectIdentifier>,
 ) -> Apdu {
     read_property_response_observed(
         db,
         None,
-        DeviceExecution::Endpoint {
-            writes,
-            reinitialize,
-        },
+        execution,
         registered_port,
         request,
         |_, _, _, _| {},

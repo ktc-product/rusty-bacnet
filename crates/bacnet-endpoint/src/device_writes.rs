@@ -46,6 +46,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables AtomicReadFile for the File objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_file_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.file_reads = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// # Panics
@@ -65,23 +78,35 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         if self.reinitialize.is_some() {
             services.push(ServiceSupported::REINITIALIZE_DEVICE);
         }
+        if self.file_reads {
+            services.push(ServiceSupported::ATOMIC_READ_FILE);
+        }
         services
     }
 
     pub(super) fn validate_device_execution(&mut self) -> Result<Option<ObjectIdentifier>, Error> {
-        let writes = self.device_write_authorizer.is_some();
-        let reinitialize = self.reinitialize.is_some();
-        // Names the capability that needs a Device, keeping the Device-writes messages as they were.
-        let (capability, subject) = if writes {
-            ("Device writes", "Device writes require")
-        } else {
-            ("ReinitializeDevice", "ReinitializeDevice requires")
-        };
+        // The first capability enabled names the one that needs a Device, keeping the
+        // Device-writes messages as they were.
+        let capability = [
+            (
+                self.device_write_authorizer.is_some(),
+                "Device writes",
+                "Device writes require",
+            ),
+            (
+                self.reinitialize.is_some(),
+                "ReinitializeDevice",
+                "ReinitializeDevice requires",
+            ),
+            (self.file_reads, "AtomicReadFile", "AtomicReadFile requires"),
+        ]
+        .into_iter()
+        .find(|(enabled, ..)| *enabled)
+        .map(|(_, name, subject)| (name, subject));
         if self.role == SessionRole::ClientOnly {
-            return if writes || reinitialize {
-                Err(Error::Encoding(format!("{subject} a server role")))
-            } else {
-                Ok(None)
+            return match capability {
+                Some((_, subject)) => Err(Error::Encoding(format!("{subject} a server role"))),
+                None => Ok(None),
             };
         }
         let allowed = self.executed_services();
@@ -98,9 +123,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 "Endpoint identity services do not match the responder's services".into(),
             ));
         }
-        if !writes && !reinitialize {
+        let Some((capability, subject)) = capability else {
             return Ok(None);
-        }
+        };
         let db = self
             .database
             .as_mut()
