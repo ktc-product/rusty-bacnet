@@ -542,3 +542,6 @@ mod device_profiles;
 
 #[path = "file_reads_tests.rs"]
 mod file_reads;
+
+#[path = "file_writes_tests.rs"]
+mod file_writes;
