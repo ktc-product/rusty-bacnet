@@ -77,6 +77,10 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 if let Some(handler) = self.reinitialize.clone() {
                     responder = responder.with_reinitialize(handler, self.reinit_password.clone());
                 }
+                if self.file_reads {
+                    responder = responder
+                        .with_file_reads(bacnet_server::server::AtomicReadFileBudget::default());
+                }
                 let responder = Arc::new(responder);
                 let handle = ServerRoleHandle::new(
                     &self.shared.token,
