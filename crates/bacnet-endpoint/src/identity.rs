@@ -44,7 +44,9 @@ pub fn client_config(identity: &DeviceIdentity) -> bacnet_client::client::Client
     config
 }
 
-/// Apply receive capacity without changing client timers or retry policy.
+/// Apply receive capacity, and the APDU timers when
+/// [`DeviceIdentity::with_apdu_timers`] set them; otherwise client timers and
+/// retry policy stay caller-owned.
 pub fn apply_to_client_config(
     identity: &DeviceIdentity,
     config: &mut bacnet_client::client::ClientConfig,
@@ -52,6 +54,10 @@ pub fn apply_to_client_config(
     config.max_apdu_length =
         bacnet_encoding::apdu::max_apdu_header_at_or_below(u32::from(identity.max_apdu_length()))
             .expect("validated identity exceeds the minimum message size");
+    if let Some((timeout_ms, retries)) = identity.apdu_timers() {
+        config.apdu_timeout_ms = u64::from(timeout_ms);
+        config.apdu_retries = retries;
+    }
 }
 
 /// Full-server settings using the same Device declarations.

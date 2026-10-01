@@ -503,8 +503,10 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     /// Composes the single Device identity (before start).
     ///
     /// Truth direction: identity overrides the standalone `SessionConfig`
-    /// 480 default for the client role max-APDU; timers/retries stay from
-    /// `SessionConfig`. Startup resolves the ceiling against the owned link.
+    /// 480 default for the client role max-APDU, and its timers/retries when
+    /// [`DeviceIdentity::with_apdu_timers`](crate::identity::DeviceIdentity::with_apdu_timers)
+    /// set them; otherwise they stay from `SessionConfig`. Startup resolves the
+    /// ceiling against the owned link.
     /// An absent database requests stock generation; an explicitly supplied
     /// database is preserved and its selected Device must match the resolved
     /// identity. Sessions without an identity keep the 480 default.
@@ -515,6 +517,12 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self.assert_configurable();
         self.client_config.max_apdu_length = identity.max_apdu_length();
         self.config.max_apdu_length = identity.max_apdu_length();
+        if let Some((timeout_ms, retries)) = identity.apdu_timers() {
+            self.client_config.apdu_timeout_ms = u64::from(timeout_ms);
+            self.client_config.apdu_retries = retries;
+            self.config.apdu_timeout_ms = u64::from(timeout_ms);
+            self.config.apdu_retries = retries;
+        }
         self.identity = Some(identity);
         self
     }
@@ -1132,6 +1140,10 @@ mod read_work_limit_tests;
 #[cfg(test)]
 #[path = "client_pacing_tests.rs"]
 mod client_pacing_tests;
+
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod identity_tests;
 
 #[path = "device_identity.rs"]
 mod device_identity;

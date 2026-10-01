@@ -41,6 +41,7 @@ pub struct DeviceIdentity {
     network_ports: Vec<NetworkPortEntry>,
     device_uuid: [u8; 16],
     name: String,
+    apdu_timers: Option<(u32, u8)>,
 }
 
 impl DeviceIdentity {
@@ -64,7 +65,15 @@ impl DeviceIdentity {
             network_ports: Vec::new(),
             device_uuid: [0; 16],
             name: format!("device-{instance}"),
+            apdu_timers: None,
         })
+    }
+
+    /// Sets the APDU timeout and retry count the Device advertises as APDU_Timeout and
+    /// Number_Of_APDU_Retries, and the client of a session composed with this identity uses.
+    pub fn with_apdu_timers(mut self, timeout_ms: u32, retries: u8) -> Self {
+        self.apdu_timers = Some((timeout_ms, retries));
+        self
     }
 
     /// Sets the raw requested receive ceiling (at least 50 bytes).
@@ -245,6 +254,12 @@ impl DeviceIdentity {
         self.apdu_segment_timeout_ms
     }
 
+    /// APDU timeout in milliseconds and retry count, when
+    /// [`with_apdu_timers`](Self::with_apdu_timers) set them.
+    pub fn apdu_timers(&self) -> Option<(u32, u8)> {
+        self.apdu_timers
+    }
+
     /// Resolve the requested receive ceiling before any transport I/O.
     pub fn resolve(&self, local_receive_capacity: u16) -> Result<Self, Error> {
         let mut identity = self.clone();
@@ -349,12 +364,7 @@ impl DeviceIdentity {
     /// use [`build_database_with_extra`]: it seeds `Object_List` with
     /// Device + ports + extras upfront so no post-add mutation is needed.
     pub fn build_database(&self) -> Result<ObjectDatabase, Error> {
-        let mut device = DeviceObject::new(DeviceConfig {
-            identity: self.clone(),
-            firmware_revision: env!("CARGO_PKG_VERSION").into(),
-            application_software_version: env!("CARGO_PKG_VERSION").into(),
-            ..DeviceConfig::default()
-        })?;
+        let mut device = DeviceObject::new(self.device_config())?;
         device.set_services_supported(&self.services);
         device.set_device_uuid(self.device_uuid);
         let device_oid = device.object_identifier();
@@ -374,6 +384,21 @@ impl DeviceIdentity {
             db.add(Box::new(port))?;
         }
         Ok(db)
+    }
+
+    /// The stock Device's configuration, with the APDU timers when set.
+    fn device_config(&self) -> DeviceConfig {
+        let mut config = DeviceConfig {
+            identity: self.clone(),
+            firmware_revision: env!("CARGO_PKG_VERSION").into(),
+            application_software_version: env!("CARGO_PKG_VERSION").into(),
+            ..DeviceConfig::default()
+        };
+        if let Some((timeout_ms, retries)) = self.apdu_timers {
+            config.apdu_timeout = timeout_ms;
+            config.apdu_retries = u32::from(retries);
+        }
+        config
     }
 }
 
@@ -400,12 +425,7 @@ pub fn build_database_with_extra(
     identity: &DeviceIdentity,
     extra: Vec<Box<dyn crate::traits::BACnetObject>>,
 ) -> Result<ObjectDatabase, Error> {
-    let mut device = DeviceObject::new(DeviceConfig {
-        identity: identity.clone(),
-        firmware_revision: env!("CARGO_PKG_VERSION").into(),
-        application_software_version: env!("CARGO_PKG_VERSION").into(),
-        ..DeviceConfig::default()
-    })?;
+    let mut device = DeviceObject::new(identity.device_config())?;
     device.set_services_supported(&identity.services);
     device.set_device_uuid(identity.device_uuid);
     let device_oid = device.object_identifier();
