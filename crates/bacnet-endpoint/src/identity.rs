@@ -236,7 +236,12 @@ pub struct DeviceIdentity {
     network_ports: Vec<NetworkPortEntry>,
     device_uuid: [u8; 16],
     name: String,
+    apdu_timers: Option<(u32, u8)>,
 }
+
+/// APDU_Timeout and Number_Of_APDU_Retries the Device advertises when no timers are set.
+const DEFAULT_APDU_TIMEOUT_MS: u32 = 6000;
+const DEFAULT_APDU_RETRIES: u8 = 3;
 
 impl DeviceIdentity {
     /// Creates an identity with endpoint-composed defaults.
@@ -258,7 +263,22 @@ impl DeviceIdentity {
             network_ports: Vec::new(),
             device_uuid: [0; 16],
             name: format!("device-{instance}"),
+            apdu_timers: None,
         })
+    }
+
+    /// Sets the APDU timeout and retry count the Device advertises as APDU_Timeout and
+    /// Number_Of_APDU_Retries, and the client of a session composed with this identity uses.
+    pub fn with_apdu_timers(mut self, timeout_ms: u32, retries: u8) -> Self {
+        self.apdu_timers = Some((timeout_ms, retries));
+        self
+    }
+
+    fn advertised_apdu_timers(&self) -> (u32, u32) {
+        let (timeout_ms, retries) = self
+            .apdu_timers
+            .unwrap_or((DEFAULT_APDU_TIMEOUT_MS, DEFAULT_APDU_RETRIES));
+        (timeout_ms, u32::from(retries))
     }
 
     /// Overrides the max-APDU accepted/advertised (must be a wire-legal value).
@@ -488,6 +508,7 @@ impl DeviceIdentity {
     /// use [`build_database_with_extra`]: it seeds `Object_List` with
     /// Device + ports + extras upfront so no post-add mutation is needed.
     pub fn build_database(&self) -> Result<ObjectDatabase, Error> {
+        let (apdu_timeout, apdu_retries) = self.advertised_apdu_timers();
         let mut device = DeviceObject::new(DeviceConfig {
             instance: self.instance,
             name: self.name.clone(),
@@ -498,8 +519,8 @@ impl DeviceIdentity {
             application_software_version: env!("CARGO_PKG_VERSION").into(),
             max_apdu_length: u32::from(self.max_apdu_length),
             segmentation_supported: self.segmentation_supported,
-            apdu_timeout: 6000,
-            apdu_retries: 3,
+            apdu_timeout,
+            apdu_retries,
             ..DeviceConfig::default()
         })?;
         device.set_services_supported(&self.services);
@@ -523,14 +544,24 @@ impl DeviceIdentity {
         Ok(db)
     }
 
-    /// Applies identity limits to a standalone SessionConfig (overrides 480).
+    /// Applies identity limits to a standalone SessionConfig (overrides 480), and the APDU
+    /// timers when [`with_apdu_timers`](Self::with_apdu_timers) set them.
     pub fn apply_to_session_config(&self, config: &mut crate::session::SessionConfig) {
         config.max_apdu_length = self.max_apdu_length;
+        if let Some((timeout_ms, retries)) = self.apdu_timers {
+            config.apdu_timeout_ms = u64::from(timeout_ms);
+            config.apdu_retries = retries;
+        }
     }
 
-    /// Applies identity to a client config (max-APDU only; timers stay caller-owned).
+    /// Applies identity to a client config: max-APDU, and the APDU timers when
+    /// [`with_apdu_timers`](Self::with_apdu_timers) set them. Otherwise timers stay caller-owned.
     pub fn apply_to_client_config(&self, config: &mut bacnet_client::client::ClientConfig) {
         config.max_apdu_length = self.max_apdu_length;
+        if let Some((timeout_ms, retries)) = self.apdu_timers {
+            config.apdu_timeout_ms = u64::from(timeout_ms);
+            config.apdu_retries = retries;
+        }
     }
 
     /// Applies identity to a server config (max-apdu + segmentation + vendor).
@@ -551,7 +582,7 @@ impl DeviceIdentity {
         config
     }
 
-    /// Derives a client config from this identity (timers stay default).
+    /// Derives a client config from this identity (timers stay default unless set).
     pub fn client_config(&self) -> bacnet_client::client::ClientConfig {
         let mut config = bacnet_client::client::ClientConfig::default();
         self.apply_to_client_config(&mut config);
@@ -581,6 +612,7 @@ pub fn build_database_with_extra(
     identity: &DeviceIdentity,
     extra: Vec<Box<dyn bacnet_objects::traits::BACnetObject>>,
 ) -> Result<ObjectDatabase, Error> {
+    let (apdu_timeout, apdu_retries) = identity.advertised_apdu_timers();
     let mut device = DeviceObject::new(DeviceConfig {
         instance: identity.instance,
         name: identity.name.clone(),
@@ -591,8 +623,8 @@ pub fn build_database_with_extra(
         application_software_version: env!("CARGO_PKG_VERSION").into(),
         max_apdu_length: u32::from(identity.max_apdu_length),
         segmentation_supported: identity.segmentation_supported,
-        apdu_timeout: 6000,
-        apdu_retries: 3,
+        apdu_timeout,
+        apdu_retries,
         ..DeviceConfig::default()
     })?;
     device.set_services_supported(&identity.services);
@@ -621,3 +653,7 @@ pub fn build_database_with_extra(
     }
     Ok(db)
 }
+
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod tests;
