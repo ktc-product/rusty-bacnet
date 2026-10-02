@@ -101,6 +101,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         self
     }
 
+    /// Enables ReadPropertyMultiple for the objects in the attached database.
+    ///
+    /// Startup requirements and the advertised services are those of
+    /// [`with_device_writes`](Self::with_device_writes).
+    ///
+    /// # Panics
+    /// Panics if startup has already consumed the session configuration.
+    pub fn with_multiple_reads(mut self) -> Self {
+        self.assert_configurable();
+        self.multiple_reads = true;
+        self
+    }
+
     /// Sets the password a ReinitializeDevice request must carry.
     ///
     /// # Panics
@@ -125,6 +138,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         }
         if self.file_writes {
             services.push(ServiceSupported::ATOMIC_WRITE_FILE);
+        }
+        if self.multiple_reads {
+            services.push(ServiceSupported::READ_PROPERTY_MULTIPLE);
         }
         services
     }
@@ -159,6 +175,11 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
                 self.file_writes,
                 "AtomicWriteFile",
                 "AtomicWriteFile requires",
+            ),
+            (
+                self.multiple_reads,
+                "ReadPropertyMultiple",
+                "ReadPropertyMultiple requires",
             ),
         ]
         .into_iter()

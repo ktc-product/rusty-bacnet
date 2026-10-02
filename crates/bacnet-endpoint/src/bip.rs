@@ -71,6 +71,7 @@ pub struct BipEndpointBuilder {
     reinit_password: Option<String>,
     file_reads: bool,
     file_writes: bool,
+    multiple_reads: bool,
     writes: bool,
     write_observer: Option<bacnet_server::server::PropertyWriteObserver>,
     source_audit_bindings: Vec<(ObjectIdentifier, SocketAddrV4)>,
@@ -103,6 +104,7 @@ impl BipEndpointBuilder {
             reinit_password: None,
             file_reads: false,
             file_writes: false,
+            multiple_reads: false,
             writes: false,
             write_observer: None,
             source_audit_bindings: Vec::new(),
@@ -208,6 +210,13 @@ impl BipEndpointBuilder {
     /// Requires `build_session()`.
     pub fn file_writes(mut self) -> Self {
         self.file_writes = true;
+        self
+    }
+
+    /// Enables ReadPropertyMultiple. See [`EndpointSession::with_multiple_reads`].
+    /// Requires `build_session()`.
+    pub fn multiple_reads(mut self) -> Self {
+        self.multiple_reads = true;
         self
     }
 
@@ -336,6 +345,11 @@ impl BipEndpointBuilder {
                 "AtomicWriteFile requires build_session()".into(),
             ));
         }
+        if self.multiple_reads {
+            return Err(Error::Encoding(
+                "ReadPropertyMultiple requires build_session()".into(),
+            ));
+        }
         if self.writes {
             return Err(Error::Encoding(
                 "WriteProperty requires build_session()".into(),
@@ -401,6 +415,7 @@ impl BipEndpointBuilder {
         let reinit_password = self.reinit_password.take();
         let file_reads = std::mem::take(&mut self.file_reads);
         let file_writes = std::mem::take(&mut self.file_writes);
+        let multiple_reads = std::mem::take(&mut self.multiple_reads);
         let writes = std::mem::take(&mut self.writes);
         let write_observer = self.write_observer.take();
         let bindings = std::mem::take(&mut self.source_audit_bindings);
@@ -431,6 +446,7 @@ impl BipEndpointBuilder {
         endpoint.reinit_password = reinit_password;
         endpoint.file_reads = file_reads;
         endpoint.file_writes = file_writes;
+        endpoint.multiple_reads = multiple_reads;
         endpoint.writes = writes;
         endpoint.write_observer = write_observer;
         endpoint.source_audit_bindings = bindings;

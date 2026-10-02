@@ -75,6 +75,59 @@ pub(super) async fn read_property_multiple_observed(
     )
 }
 
+/// ReadPropertyMultiple under the narrow responder's execution profile, within `budget`.
+pub(super) async fn read_property_multiple_response(
+    db: &RwLock<ObjectDatabase>,
+    request: &ConfirmedRequestPdu,
+    execution: DeviceExecution,
+    registered_port: Option<ObjectIdentifier>,
+    budget: crate::server::ReadPropertyMultipleBudget,
+) -> Apdu {
+    let invoke_id = request.invoke_id;
+    let service_choice = request.service_choice;
+    let mut service_ack = BytesMut::with_capacity(512);
+    let db = db.read().await;
+    let result =
+        bacnet_services::rpm::ReadPropertyMultipleRequest::decode(&request.service_request)
+            .map_err(handlers::RpmFailure::Service)
+            .and_then(|decoded| {
+                let view = DeviceReadContext::new(&db, execution, None)
+                    .with_registered_port(registered_port);
+                handlers::rpm_budgeted_request_observed(
+                    &db,
+                    Some(&view),
+                    &decoded,
+                    &mut service_ack,
+                    budget,
+                    |_, _, _, _| {},
+                )
+            });
+    match result {
+        Ok(()) => Apdu::ComplexAck(ComplexAck {
+            segmented: false,
+            more_follows: false,
+            invoke_id,
+            sequence_number: None,
+            proposed_window_size: None,
+            service_choice,
+            service_ack: service_ack.freeze(),
+        }),
+        Err(handlers::RpmFailure::Service(error)) => {
+            error_apdu_from_error(invoke_id, service_choice, &error)
+        }
+        Err(handlers::RpmFailure::Work) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::OUT_OF_RESOURCES,
+        }),
+        Err(handlers::RpmFailure::Bytes) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::BUFFER_OVERFLOW,
+        }),
+    }
+}
+
 pub(super) async fn read_property_response_observed(
     db: &RwLock<ObjectDatabase>,
     cov_table: Option<&RwLock<CovSubscriptionTable>>,
