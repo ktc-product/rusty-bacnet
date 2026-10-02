@@ -545,3 +545,6 @@ mod file_writes;
 
 #[path = "writes_tests.rs"]
 mod writes;
+
+#[path = "multiple_reads_tests.rs"]
+mod multiple_reads;

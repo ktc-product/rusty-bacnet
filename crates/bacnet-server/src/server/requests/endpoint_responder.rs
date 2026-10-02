@@ -79,9 +79,9 @@ fn source_address(received: &ReceivedApdu) -> bacnet_types::constructed::BACnetA
 ///
 /// Handles `ReadProperty`, `WriteProperty` either to any object or authorized to
 /// the local Device Description/active recipient only, optionally
-/// `ReinitializeDevice` through its handler, optionally `AtomicReadFile` and
-/// `AtomicWriteFile`, plus `Reject`/`Abort`. Full service parity is a later
-/// packet. Inbound transactions reuse the
+/// `ReadPropertyMultiple`, optionally `ReinitializeDevice` through its handler,
+/// optionally `AtomicReadFile` and `AtomicWriteFile`, plus `Reject`/`Abort`. Full
+/// service parity is a later packet. Inbound transactions reuse the
 /// wire invoke ID directly and NEVER allocate from the shared outbound
 /// client ID pool, so equal inbound/outbound numeric IDs stay unambiguous
 /// via the ingress classifier + coordinator admission.
@@ -97,6 +97,7 @@ pub struct EndpointResponder {
     reinitialize: Option<(ReinitializeHandler, Option<String>)>,
     file_reads: Option<AtomicReadFileBudget>,
     file_writes: Option<AtomicWriteFileBudget>,
+    multiple_reads: Option<ReadPropertyMultipleBudget>,
     registered_port: Option<(ObjectIdentifier, std::sync::Weak<()>)>,
     read_work_limit: usize,
 }
@@ -126,6 +127,7 @@ impl EndpointResponder {
             reinitialize: None,
             file_reads: None,
             file_writes: None,
+            multiple_reads: None,
             registered_port: None,
             read_work_limit: crate::server::ReadPropertyMultipleBudget::default()
                 .max_result_elements,
@@ -208,12 +210,20 @@ impl EndpointResponder {
         self
     }
 
+    /// Serve ReadPropertyMultiple within `budget`.
+    #[doc(hidden)]
+    pub fn with_multiple_reads(mut self, budget: ReadPropertyMultipleBudget) -> Self {
+        self.multiple_reads = Some(budget);
+        self
+    }
+
     fn execution(&self) -> DeviceExecution {
         DeviceExecution::Endpoint {
             writes: self.device_writes.is_some() || self.writes,
             reinitialize: self.reinitialize.is_some(),
             file_reads: self.file_reads.is_some(),
             file_writes: self.file_writes.is_some(),
+            multiple_reads: self.multiple_reads.is_some(),
         }
     }
 
@@ -390,6 +400,9 @@ impl EndpointResponder {
         let file_write_budget = self
             .file_writes
             .filter(|_| request.service_choice == ConfirmedServiceChoice::ATOMIC_WRITE_FILE);
+        let multiple_read_budget = self
+            .multiple_reads
+            .filter(|_| request.service_choice == ConfirmedServiceChoice::READ_PROPERTY_MULTIPLE);
         let mut response = if request.segmented {
             Apdu::Abort(AbortPdu {
                 sent_by_server: true,
@@ -403,6 +416,15 @@ impl EndpointResponder {
                 self.execution(),
                 self.registered_port.as_ref().map(|(oid, _)| *oid),
                 self.read_work_limit,
+            )
+            .await
+        } else if let Some(budget) = multiple_read_budget {
+            confirmed_response::read_property_multiple_response(
+                self.db(),
+                &request,
+                self.execution(),
+                self.registered_port.as_ref().map(|(oid, _)| *oid),
+                budget,
             )
             .await
         } else if let Some((handler, password)) = reinitialization {

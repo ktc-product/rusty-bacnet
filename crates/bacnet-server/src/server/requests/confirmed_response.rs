@@ -114,6 +114,60 @@ pub(super) async fn read_property_multiple_observed(
     )
 }
 
+/// ReadPropertyMultiple under the narrow responder's execution profile, within `budget`. The
+/// responder keeps no COV subscriptions, so no live COV projection is read.
+pub(super) async fn read_property_multiple_response(
+    db: &RwLock<ObjectDatabase>,
+    request: &ConfirmedRequestPdu,
+    execution: DeviceExecution,
+    registered_port: Option<ObjectIdentifier>,
+    budget: crate::server::ReadPropertyMultipleBudget,
+) -> Apdu {
+    let invoke_id = request.invoke_id;
+    let service_choice = request.service_choice;
+    let mut service_ack = BytesMut::with_capacity(512);
+    let db = db.read().await;
+    let result =
+        bacnet_services::rpm::ReadPropertyMultipleRequest::decode(&request.service_request)
+            .map_err(|error| handlers::ReadFailure::Service(error.into_request_reject()))
+            .and_then(|decoded| {
+                let view =
+                    DeviceReadContext::new(&db, execution).with_registered_port(registered_port);
+                handlers::RpmPlan::new(&db, &decoded, budget.max_result_elements, Some(&view))?
+                    .read_observed(
+                        &db,
+                        Some(&view),
+                        &mut service_ack,
+                        budget.max_service_ack_bytes,
+                        |_, _, _, _| {},
+                    )
+            });
+    match result {
+        Ok(()) => Apdu::ComplexAck(ComplexAck {
+            segmented: false,
+            more_follows: false,
+            invoke_id,
+            sequence_number: None,
+            proposed_window_size: None,
+            service_choice,
+            service_ack: service_ack.freeze(),
+        }),
+        Err(handlers::ReadFailure::Service(error)) => {
+            error_apdu_from_error(invoke_id, service_choice, &error)
+        }
+        Err(handlers::ReadFailure::Work) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::OUT_OF_RESOURCES,
+        }),
+        Err(handlers::ReadFailure::Bytes) => Apdu::Abort(AbortPdu {
+            sent_by_server: true,
+            invoke_id,
+            abort_reason: AbortReason::BUFFER_OVERFLOW,
+        }),
+    }
+}
+
 /// ReadProperty under one database read guard, planned before any table is
 /// sampled (#1213). A Group's Present_Value counts against `work_limit` as
 /// a ReadPropertyMultiple naming only it would, and a read past it is aborted
