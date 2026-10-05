@@ -56,6 +56,9 @@ impl DeviceAuthority<'_> {
     pub fn set_system_status(&mut self, status: DeviceStatus) {
         self.0.set_system_status(status);
     }
+    pub fn set_database_revision(&mut self, revision: u32) {
+        self.0.set_database_revision(revision);
+    }
     pub fn set_backup_and_restore_state(&mut self, state: BackupAndRestoreState) {
         self.0.set_backup_and_restore_state(state);
     }

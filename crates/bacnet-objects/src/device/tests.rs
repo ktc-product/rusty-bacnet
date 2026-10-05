@@ -1,5 +1,6 @@
 mod audit_recipient;
 mod backup;
+mod database_revision;
 mod description;
 
 use super::*;

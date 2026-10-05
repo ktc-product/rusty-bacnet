@@ -424,6 +424,15 @@ impl DeviceObject {
         );
     }
 
+    /// Set `Database_Revision`, which a client compares against its cached copy to see whether
+    /// objects were created, deleted, renamed or re-identified, or a restore happened.
+    pub fn set_database_revision(&mut self, revision: u32) {
+        self.properties.insert(
+            PropertyIdentifier::DATABASE_REVISION,
+            PropertyValue::Unsigned(u64::from(revision)),
+        );
+    }
+
     /// Name the File objects that hold this device's configuration (`Configuration_Files`).
     /// Ignored unless the device was built with [`DeviceConfig::backup_and_restore`].
     pub fn set_configuration_files(&mut self, files: Vec<ObjectIdentifier>) {
