@@ -40,7 +40,7 @@ pub use read_request::{EndpointReadAck, EndpointReadRequest};
 use crate::tsm::{CompletionOutcome, CoordinatedCompletion, TransactionOwner, Tsm, TsmResponse};
 
 fn shutdown_error() -> Error {
-    Error::Encoding("endpoint shutdown".into())
+    Error::Shutdown
 }
 
 /// The transaction peer an outbound endpoint destination is keyed to, the

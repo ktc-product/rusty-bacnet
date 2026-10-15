@@ -220,13 +220,13 @@ impl SourceAudit {
             .map_err(|_| Error::Encoding("source Audit admission is closed or full".into()))?;
         let mut db = self.db.write().await;
         if self.operations.is_closed() {
-            return Err(Error::Encoding("endpoint shutdown".into()));
+            return Err(Error::Shutdown);
         }
         let runtime = self
             .runtime
             .upgrade()
             .filter(|runtime| runtime.owner.is_active())
-            .ok_or_else(|| Error::Encoding("endpoint shutdown".into()))?;
+            .ok_or(Error::Shutdown)?;
         let reporter = db
             .get(&self.selected)
             .and_then(|object| object.audit_reporter())
@@ -384,10 +384,7 @@ impl SourceAudit {
         status.set_configured(true);
         drop(db);
         drop(runtime);
-        let owner = self
-            .notifications
-            .upgrade()
-            .ok_or_else(|| Error::Encoding("endpoint shutdown".into()))?;
+        let owner = self.notifications.upgrade().ok_or(Error::Shutdown)?;
         let weak_owner = Arc::downgrade(&owner);
         let source = Arc::clone(self);
         let (reply, response) = oneshot::channel();
@@ -443,9 +440,7 @@ impl SourceAudit {
             let _ = reply.send(outcome.result);
         });
         drop(owner);
-        response
-            .await
-            .map_err(|_| Error::Encoding("endpoint shutdown".into()))?
+        response.await.map_err(|_| Error::Shutdown)?
     }
 
     /// Report an operation carried out on this device as a whole, such as
