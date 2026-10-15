@@ -263,7 +263,7 @@ async fn direct_egress_preserves_npdu_flags_priority_and_destination() {
                 NetworkPriority::NORMAL,
             )
             .await,
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
 }
 
@@ -329,10 +329,7 @@ async fn saturated_egress_is_bounded_and_stop_cancels_accepted_commands() {
     ));
     assert_eq!(handle.stops.load(Ordering::SeqCst), 1);
     for result in [first.await.unwrap(), second.await.unwrap()] {
-        assert!(matches!(
-            result,
-            Err(Error::Encoding(message)) if message == "endpoint shutdown"
-        ));
+        assert!(matches!(result, Err(Error::Shutdown)));
     }
 }
 

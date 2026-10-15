@@ -76,7 +76,7 @@ async fn a_waiting_audited_read_fails_at_once_when_the_session_stops_or_drops() 
         };
         let error = bounded(read).await.unwrap().unwrap_err();
         assert!(
-            matches!(&error, Error::Encoding(message) if message == "endpoint shutdown"),
+            matches!(error, Error::Shutdown),
             "stopped {stop}: {error:?}"
         );
         // The waiter no longer holds the source, so nothing of the session

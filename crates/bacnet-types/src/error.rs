@@ -106,6 +106,11 @@ pub enum Error {
         actual: DataLink,
     },
 
+    /// The endpoint session a request belongs to has stopped, before or while the request ran.
+    /// Nothing more goes out through it.
+    #[error("endpoint shutdown")]
+    Shutdown,
+
     /// Error encoding a PDU.
     #[error("encoding error: {0}")]
     Encoding(String),

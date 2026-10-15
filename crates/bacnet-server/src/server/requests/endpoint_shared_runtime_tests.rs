@@ -251,7 +251,7 @@ async fn loopback_shared_runtime_routes_same_invoke_id_by_admitted_role() {
                 NetworkPriority::NORMAL,
             )
             .await,
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
     assert!(matches!(
         requester
@@ -262,6 +262,6 @@ async fn loopback_shared_runtime_routes_same_invoke_id_by_admitted_role() {
                 None,
             )
             .await,
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
 }

@@ -40,7 +40,7 @@ use bacnet_server::server::{
 };
 
 fn shutdown_error() -> Error {
-    Error::Encoding("endpoint shutdown".into())
+    Error::Shutdown
 }
 
 /// Session-owned open state shared with role handles.
@@ -235,7 +235,7 @@ impl ClientRoleHandle {
     /// Device/Network Port wildcard requests accept a same-type concrete ACK;
     /// other mismatches return a decoding error.
     ///
-    /// Fails closed with `"endpoint shutdown"` once the owning session stops
+    /// Fails closed with [`Error::Shutdown`] once the owning session stops
     /// or drops. Timeouts/retries come from the session config (or the
     /// composed identity's max-APDU override for the length clamp).
     pub async fn read_property(

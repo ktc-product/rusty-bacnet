@@ -192,7 +192,7 @@ async fn close_cancels_exact_pending_lease_and_rejects_future_requests() {
     assert_eq!(coordinator.active_count().unwrap(), 0);
     assert!(matches!(
         request_handle.await.unwrap(),
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
     assert!(matches!(
         requester
@@ -203,7 +203,7 @@ async fn close_cancels_exact_pending_lease_and_rejects_future_requests() {
                 None,
             )
             .await,
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
 
     endpoint.stop().await.unwrap();

@@ -273,10 +273,7 @@ async fn a_waiting_endpoint_request_fails_at_once_when_the_session_stops() {
     session.stop().await.unwrap();
     let ended = tokio::time::timeout(Duration::from_secs(1), waiting).await;
     let error = ended.expect("ended at once").unwrap().unwrap_err();
-    assert!(
-        matches!(&error, Error::Encoding(message) if message == "endpoint shutdown"),
-        "{error:?}"
-    );
+    assert!(matches!(error, Error::Shutdown), "{error:?}");
     assert_eq!(sends.lock().unwrap().len(), 1);
 }
 
