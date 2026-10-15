@@ -18,7 +18,7 @@ use crate::endpoint_cov::EndpointCov;
 
 #[allow(dead_code)]
 fn shutdown_error() -> Error {
-    Error::Encoding("endpoint shutdown".into())
+    Error::Shutdown
 }
 
 fn property_error(class: ErrorClass, code: ErrorCode) -> Error {

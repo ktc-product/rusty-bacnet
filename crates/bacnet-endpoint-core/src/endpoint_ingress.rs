@@ -17,7 +17,7 @@ use crate::seat::SeatSlot;
 const NUMBER_CONTROL_QUEUE: usize = 256;
 
 fn shutdown_error() -> Error {
-    Error::Encoding("endpoint shutdown".into())
+    Error::Shutdown
 }
 
 const EFFECTIVE_GROUP_APDU_ERROR: &str =
