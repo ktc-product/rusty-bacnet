@@ -163,6 +163,11 @@ pub enum Error {
         actual: DataLink,
     },
 
+    /// The endpoint session a request belongs to has stopped, before or while the request ran.
+    /// Nothing more goes out through it.
+    #[error("endpoint shutdown")]
+    Shutdown,
+
     /// A definite length refusal before any bytes of this send were written
     /// or admitted to a transport's write queue. The limit may apply to the
     /// NPDU or its full link envelope, including data attributes. An I/O

@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 fn shutdown_error() -> Error {
-    Error::Encoding("endpoint shutdown".into())
+    Error::Shutdown
 }
 
 const EFFECTIVE_GROUP_APDU_ERROR: &str =

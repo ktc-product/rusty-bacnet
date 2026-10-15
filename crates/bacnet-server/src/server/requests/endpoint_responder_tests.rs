@@ -104,7 +104,7 @@ async fn responder_moves_reply_sender_once_and_preserves_routed_destination() {
                 reply_tx: None,
             })
             .await,
-        Err(Error::Encoding(message)) if message == "endpoint shutdown"
+        Err(Error::Shutdown)
     ));
     endpoint.stop().await.unwrap();
     peer_transport.stop().await.unwrap();
