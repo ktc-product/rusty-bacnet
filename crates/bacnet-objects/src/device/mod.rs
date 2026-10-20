@@ -125,9 +125,10 @@ pub struct DeviceConfig {
     pub firmware_revision: String,
     /// Application software version string.
     pub application_software_version: String,
-    /// APDU timeout in milliseconds.
+    /// APDU timeout in milliseconds, used when the identity sets no APDU timers
+    /// ([`DeviceIdentity::with_apdu_timers`](crate::DeviceIdentity::with_apdu_timers)).
     pub apdu_timeout: u32,
-    /// Number of APDU retries.
+    /// Number of APDU retries, used when the identity sets no APDU timers.
     pub apdu_retries: u32,
     /// Whether the device performs the backup and restore procedures (Clause 19.1), which
     /// adds Configuration_Files, Last_Restore_Time, Backup_Failure_Timeout and
@@ -236,13 +237,17 @@ impl DeviceObject {
             PropertyIdentifier::SEGMENTATION_SUPPORTED,
             PropertyValue::Enumerated(config.identity.segmentation().to_raw() as u32),
         );
+        let (apdu_timeout, apdu_retries) = config.identity.apdu_timers().map_or(
+            (config.apdu_timeout, config.apdu_retries),
+            |(timeout_ms, retries)| (timeout_ms, u32::from(retries)),
+        );
         properties.insert(
             PropertyIdentifier::APDU_TIMEOUT,
-            PropertyValue::Unsigned(config.apdu_timeout as u64),
+            PropertyValue::Unsigned(u64::from(apdu_timeout)),
         );
         properties.insert(
             PropertyIdentifier::NUMBER_OF_APDU_RETRIES,
-            PropertyValue::Unsigned(config.apdu_retries as u64),
+            PropertyValue::Unsigned(u64::from(apdu_retries)),
         );
         properties.insert(
             PropertyIdentifier::DATABASE_REVISION,

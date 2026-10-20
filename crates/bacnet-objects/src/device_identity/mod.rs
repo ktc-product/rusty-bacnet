@@ -386,19 +386,14 @@ impl DeviceIdentity {
         Ok(db)
     }
 
-    /// The stock Device's configuration, with the APDU timers when set.
+    /// The stock Device's configuration.
     fn device_config(&self) -> DeviceConfig {
-        let mut config = DeviceConfig {
+        DeviceConfig {
             identity: self.clone(),
             firmware_revision: env!("CARGO_PKG_VERSION").into(),
             application_software_version: env!("CARGO_PKG_VERSION").into(),
             ..DeviceConfig::default()
-        };
-        if let Some((timeout_ms, retries)) = self.apdu_timers {
-            config.apdu_timeout = timeout_ms;
-            config.apdu_retries = u32::from(retries);
         }
-        config
     }
 }
 

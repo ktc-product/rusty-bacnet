@@ -140,3 +140,29 @@ fn invalid_segmentation_is_rejected_at_construction() {
     })
     .is_err());
 }
+
+/// APDU_Timeout and Number_Of_APDU_Retries as `dev` reports them.
+fn apdu_timers(dev: &DeviceObject) -> (PropertyValue, PropertyValue) {
+    (
+        dev.read_property(PropertyIdentifier::APDU_TIMEOUT, None)
+            .unwrap(),
+        dev.read_property(PropertyIdentifier::NUMBER_OF_APDU_RETRIES, None)
+            .unwrap(),
+    )
+}
+
+#[test]
+fn identity_apdu_timers_override_the_config_fields() {
+    let dev = DeviceObject::new(DeviceConfig {
+        identity: crate::DeviceIdentity::default().with_apdu_timers(2500, 2),
+        apdu_timeout: 9000,
+        apdu_retries: 5,
+        ..DeviceConfig::default()
+    })
+    .unwrap();
+
+    assert_eq!(
+        apdu_timers(&dev),
+        (PropertyValue::Unsigned(2500), PropertyValue::Unsigned(2))
+    );
+}
