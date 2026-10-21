@@ -1,6 +1,6 @@
 //! Outputs that wait in the queue, and how each is written when polled.
 
-use super::config::PortConfig;
+use super::config::{closed, routes, PortConfig};
 use super::counters::bump;
 use super::output::{Cause, Current, Kind, Target};
 use super::Storage;
@@ -150,27 +150,36 @@ fn write_message(
     Some(at + len)
 }
 
-/// The routes from network `from` on that have a wire Port ID, ascending,
-/// as (network, Port ID).
-fn wire_entries<const R: usize, const H: usize>(
-    table: &Table<R, H>,
+/// The routes from network `from` on that have a wire Port ID, through
+/// ports that route (`forwarding` of `ports` forward), ascending, as
+/// (network, Port ID).
+fn wire_entries<'a, const R: usize, const H: usize, G>(
+    table: &'a Table<R, H>,
+    ports: &'a [PortConfig<G>],
+    forwarding: usize,
     from: u32,
-) -> impl Iterator<Item = (u16, u8)> + Clone + '_ {
+) -> impl Iterator<Item = (u16, u8)> + Clone + 'a {
     table
         .routes()
-        .filter(move |(network, _)| u32::from(*network) >= from)
+        .filter(move |(network, route)| {
+            u32::from(*network) >= from && !closed(ports, forwarding, usize::from(route.port().0))
+        })
         .filter_map(|(network, route)| Some((network, route.port().wire_id()?)))
 }
 
-/// Every other port's network, in port order.
+/// Every other port's network that routes (`forwarding` of `ports`
+/// forward), in port order.
 fn other_networks<G>(
     ports: &[PortConfig<G>],
+    forwarding: usize,
     port: PortId,
 ) -> impl Iterator<Item = u16> + Clone + '_ {
     ports
         .iter()
         .enumerate()
-        .filter(move |(index, _)| *index != usize::from(port.0))
+        .filter(move |(index, _)| {
+            *index != usize::from(port.0) && routes(ports, forwarding, *index)
+        })
         .map(|(_, config)| config.network)
 }
 
@@ -224,12 +233,15 @@ impl<
                 Some((len, Kind::Reject(task.reason), Cause::Ingress, target))
             }
             TaskKind::IAmAnswer => {
+                let ports = &self.ports[..self.port_count];
+                let forwarding = self.forwarding_ports;
                 let mut others = self
                     .table
                     .routes()
                     .filter(move |(_, route)| {
                         route.port() != task.port
                             && route.reachability() != Reachability::Unreachable
+                            && !closed(ports, forwarding, usize::from(route.port().0))
                     })
                     .map(|(network, _)| network)
                     .peekable();
@@ -259,7 +271,9 @@ impl<
                 Some((len, kind, Cause::Ingress, target))
             }
             TaskKind::TableAck => {
-                let entries = wire_entries(&self.table, task.cursor).take(ACK_ENTRIES);
+                let ports = &self.ports[..self.port_count];
+                let entries = wire_entries(&self.table, ports, self.forwarding_ports, task.cursor)
+                    .take(ACK_ENTRIES);
                 let last = entries.clone().last().map(|(network, _)| network);
                 // The first Ack goes even for an empty table, with a count
                 // of 0; later ones only while routes remain.
@@ -336,18 +350,22 @@ impl<
     }
 
     /// Write the next startup announcement from `cursor` (port index × 2 +
-    /// step): a Network-Number-Is with the port's number (Clause 6.4.20);
-    /// then an I-Am-Router listing every other port's network, in
-    /// port order, when there is another port. Returns its cursor and its
+    /// step), on a port that routes: a Network-Number-Is with the port's
+    /// number (Clause 6.4.20); then an I-Am-Router listing every other
+    /// routing port's network, in port order. Returns its cursor and its
     /// length (`None`: the writer refused it), or `None` when none is left.
     fn next_announcement(&mut self, cursor: u32) -> Option<(u32, Option<usize>)> {
         for at in cursor..self.announce_end() {
             let port = PortId((at >> 1) as u8);
+            if !self.routes(port) {
+                continue;
+            }
             if at & 1 == 0 {
                 return Some((at, self.write_number_is(port)));
             }
             if self.port_count > 1 {
-                let others = other_networks(&self.ports[..self.port_count], port);
+                let others =
+                    other_networks(&self.ports[..self.port_count], self.forwarding_ports, port);
                 let len = write_message(
                     &mut self.scratch,
                     NetworkMessageType::I_AM_ROUTER_TO_NETWORK,

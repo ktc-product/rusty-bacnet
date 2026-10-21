@@ -1,15 +1,15 @@
 //! A received frame, from its link source to the decision on its APDU.
 
-use super::config::Options;
+use super::config::{closed, routes, Options};
 use super::counters::bump;
 use super::host::Host;
 use super::tasks::Task;
 use super::Group;
 use super::Storage;
-use crate::node::admit;
 pub(super) use crate::node::is_unconfirmed;
-use crate::npdu::RejectMessageReason;
+use crate::node::{admit, for_this_node};
 use crate::npdu::{Address, AddressField, Malformed, NetworkPriority, Npdu, GLOBAL_NETWORK};
+use crate::npdu::{NetworkMessageType, RejectMessageReason};
 use crate::table::{Reachability, Route};
 use crate::{Instant, Mac, PortId};
 
@@ -69,9 +69,9 @@ pub struct Local<'f> {
 }
 
 /// Why a frame was discarded. Each reason the router gives has its count
-/// in its [`Counters`](super::Counters); [`NotRouted`](Self::NotRouted),
-/// which only a node gives, is counted in the node's
-/// [`Counters`](crate::node::Counters) instead.
+/// in its [`Counters`](super::Counters); a node counts
+/// [`NotRouted`](Self::NotRouted) in its own
+/// [`Counters`](crate::node::Counters).
 ///
 /// It is `#[non_exhaustive]`, so a new reason isn't a breaking change: a
 /// `match` needs a wildcard arm.
@@ -122,10 +122,26 @@ pub enum Discard {
     /// ([`Options::duplicates`](super::Options::duplicates), #1698):
     /// neither relayed nor delivered.
     Duplicate,
-    /// Only a [`Node`](crate::node::Node) gives this: an NPDU whose DNET
-    /// names one network is for a device elsewhere, which a node that
-    /// doesn't route drops (Clauses 6.5.2.1, 6.5.2.2 and 6.5.4).
+    /// An NPDU whose DNET names one network is for a device elsewhere, which
+    /// a [`Node`](crate::node::Node) drops (Clauses 6.5.2.1, 6.5.2.2 and
+    /// 6.5.4). A router drops it too on a port that doesn't route
+    /// ([`PortConfig::forwarding`](super::PortConfig::forwarding)), with any
+    /// network message there.
     NotRouted,
+}
+
+/// Whether the router takes a network message of `kind` on a port that
+/// doesn't route: the ones it learns routes, their state or the port's
+/// network number from. It answers none of them.
+fn learned_on_a_closed_port(kind: NetworkMessageType) -> bool {
+    matches!(
+        kind,
+        NetworkMessageType::I_AM_ROUTER_TO_NETWORK
+            | NetworkMessageType::REJECT_MESSAGE_TO_NETWORK
+            | NetworkMessageType::ROUTER_BUSY_TO_NETWORK
+            | NetworkMessageType::ROUTER_AVAILABLE_TO_NETWORK
+            | NetworkMessageType::NETWORK_NUMBER_IS
+    )
 }
 
 /// What the router knows about the frame in hand.
@@ -226,10 +242,68 @@ impl<
             link_group: frame.link_group,
             now,
         };
+        if !self.routes(frame.port) {
+            return self.receive_closed(&at, &npdu, options, host);
+        }
         if let Some(kind) = npdu.message_type {
             return self.network_message(&at, &npdu, kind, options, host);
         }
         self.route_apdu(&at, &npdu, options, host)
+    }
+
+    /// Whether `port` routes ([`PortConfig::forwarding`](super::PortConfig::forwarding)).
+    pub(super) fn routes(&self, port: PortId) -> bool {
+        routes(
+            &self.ports[..self.port_count],
+            self.forwarding_ports,
+            usize::from(port.0),
+        )
+    }
+
+    /// Whether the port at `index` doesn't route, among the ports the
+    /// router has.
+    pub(super) fn closed(&self, index: usize) -> bool {
+        closed(&self.ports[..self.port_count], self.forwarding_ports, index)
+    }
+
+    /// A frame on a port that doesn't route. An APDU with no DNET, or a
+    /// global broadcast, is the router's own application's and goes no
+    /// further, as is one addressed to the router on any of its networks: a
+    /// reply to a request it sent from another port's address. A network
+    /// message the router learns from is taken as on any port when it is
+    /// for this network, and a reject also when it is addressed to the
+    /// router; what either would pass on goes nowhere ([`Self::forward`]
+    /// and the fan-outs leave such a port out). One for another network is
+    /// never routed, nor answered with a reject. Anything else is dropped.
+    fn receive_closed<'f>(
+        &mut self,
+        at: &Arrival<'f>,
+        npdu: &Npdu<'f>,
+        options: &Options,
+        host: &mut impl Host,
+    ) -> Received<'f> {
+        let for_this_network = npdu.destination.is_none_or(|destination| {
+            destination.network == GLOBAL_NETWORK || destination.network == at.network
+        });
+        let to_the_router = npdu
+            .destination
+            .is_some_and(|destination| !destination.mac.is_empty() && self.is_own(destination));
+        match (for_this_node(npdu), npdu.message_type) {
+            (Some(global), None) => {
+                Received::Local(local(at, npdu, global || at.link_group, global))
+            }
+            (None, None) if to_the_router => Received::Local(local(at, npdu, false, false)),
+            (_, Some(kind))
+                if (for_this_network && learned_on_a_closed_port(kind))
+                    || (to_the_router && kind == NetworkMessageType::REJECT_MESSAGE_TO_NETWORK) =>
+            {
+                self.network_message(at, npdu, kind, options, host)
+            }
+            _ => {
+                bump(&mut self.counters.not_routed);
+                Received::Discarded(Discard::NotRouted)
+            }
+        }
     }
 
     /// Deliver or route an APDU by its DNET.
@@ -339,6 +413,18 @@ impl<
             );
             return None;
         };
+        // A network behind a port that doesn't route is one this router
+        // doesn't reach, for anyone but its own application.
+        if self.closed(usize::from(route.port().0)) {
+            self.reject(
+                at,
+                npdu.source,
+                dnet,
+                RejectMessageReason::NOT_DIRECTLY_CONNECTED,
+                host,
+            );
+            return None;
+        }
         self.table.touch(dnet, at.now);
         let refusal = match reachability {
             Some(Reachability::Busy) => RejectMessageReason::ROUTER_BUSY,

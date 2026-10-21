@@ -54,6 +54,7 @@ pub struct RouterOptions<
     authorizer: Option<ControlAuthorizer>,
     network_control: bool,
     engine: Options,
+    not_forwarding: Vec<u16>,
     receivers: PhantomData<fn() -> (A, C)>,
 }
 
@@ -81,6 +82,7 @@ impl RouterOptions {
             authorizer: None,
             network_control: false,
             engine: OPTIONS,
+            not_forwarding: Vec::new(),
             receivers: PhantomData,
         }
     }
@@ -244,9 +246,28 @@ impl<A, C> RouterOptions<A, C> {
         self
     }
 
+    /// Start the port on `network` not forwarding: the router's own
+    /// application still sends and receives through it, but no other
+    /// traffic crosses between it and the other ports, and the router
+    /// announces nothing on it nor its network on the others. It still
+    /// learns routes from what arrives there, for its own application's use.
+    /// [`BACnetRouter::set_forwarding`] changes it while the router runs.
+    /// Once a port is off, the router routes only between ports that still
+    /// forward, and with fewer than two of those it routes nothing. A
+    /// network no port is on fails [`BACnetRouter::start`].
+    pub fn not_forwarding(mut self, network: u16) -> Self {
+        self.not_forwarding.push(network);
+        self
+    }
+
     /// The engine's options these select.
     pub(super) fn engine_options(&self) -> Options {
         self.engine
+    }
+
+    /// The networks whose ports start not forwarding.
+    pub(super) fn not_forwarding_networks(&self) -> &[u16] {
+        &self.not_forwarding
     }
 
     /// The wire-control gate these options select.
@@ -266,6 +287,7 @@ impl<A, C> RouterOptions<A, C> {
             authorizer: self.authorizer,
             network_control: self.network_control,
             engine: self.engine,
+            not_forwarding: self.not_forwarding,
             receivers: PhantomData,
         }
     }
@@ -281,6 +303,7 @@ impl<A, C> fmt::Debug for RouterOptions<A, C> {
             )
             .field("network_control", &self.network_control)
             .field("engine", &self.engine)
+            .field("not_forwarding", &self.not_forwarding)
             .field("apdus", &std::any::type_name::<A>())
             .field("controls", &std::any::type_name::<C>())
             .finish()

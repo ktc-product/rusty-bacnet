@@ -76,4 +76,7 @@ pub struct Counters {
     /// Requests the router's own application sent through the engine
     /// ([`BACnetRouter::originate`](super::BACnetRouter::originate), #1699).
     pub originated: u64,
+    /// Frames a port that doesn't forward dropped: an NPDU for another
+    /// network, or a network message.
+    pub not_routed: u64,
 }

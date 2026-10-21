@@ -71,7 +71,7 @@ mod tasks;
 use core::borrow::BorrowMut;
 use core::fmt;
 
-pub use config::{ConfigError, LimitError, Options, PortConfig, MIN_PORT_LIMIT};
+pub use config::{ConfigError, ForwardingError, LimitError, Options, PortConfig, MIN_PORT_LIMIT};
 pub use congestion::{Backlog, Congestion};
 pub use counters::Counters;
 pub use duplicates::Duplicates;
@@ -83,6 +83,7 @@ pub use output::{Action, Cause, Dest, Kind, Send, SendRefusal};
 pub use reject::RejectOrigin;
 pub use reply::{ReplyPlan, ReplyPlanError};
 
+use config::routes;
 use congestion::Flow;
 pub(crate) use counters::bump;
 use duplicates::Recent;
@@ -132,6 +133,8 @@ pub struct Storage<
     /// Each port's congestion state (#1697).
     flows: [Flow; P],
     port_count: usize,
+    /// How many of the ports forward ([`PortConfig::forwarding`]).
+    forwarding_ports: usize,
     table: Table<R, H>,
     discovery: Discovery<D>,
     scratch: [u8; N],
@@ -167,6 +170,7 @@ impl<
             ports: [const { PortConfig::ZERO }; P],
             flows: [Flow::CLEAR; P],
             port_count: 0,
+            forwarding_ports: 0,
             table: Table::new(),
             discovery: Discovery::new(),
             scratch: [0; N],
@@ -375,6 +379,7 @@ where
         // Release custom rules from ports a prior router used in this storage.
         store.ports[ports.len()..].fill_with(|| PortConfig::ZERO);
         store.port_count = ports.len();
+        store.forwarding_ports = ports.iter().filter(|port| port.forwarding).count();
         store.flows = [Flow::CLEAR; P];
         for (index, port) in ports.iter().enumerate() {
             if !store.table.add_direct(port.network, PortId(index as u8)) {
@@ -558,6 +563,37 @@ where
             return Err(LimitError::OutOfRange);
         }
         config.max_npdu = limits;
+        Ok(())
+    }
+
+    /// Turn forwarding on or off for `port` ([`PortConfig::forwarding`]).
+    /// When ports route after the change, the startup announcements go out
+    /// again, so the routers on their networks learn what this one now
+    /// reaches.
+    pub fn set_port_forwarding(
+        &mut self,
+        port: PortId,
+        forwarding: bool,
+    ) -> Result<(), ForwardingError> {
+        let store = self.store();
+        let count = store.port_count;
+        let Some(config) = store.ports[..count].get_mut(usize::from(port.0)) else {
+            return Err(ForwardingError::UnknownPort);
+        };
+        if config.forwarding == forwarding {
+            return Ok(());
+        }
+        config.forwarding = forwarding;
+        if forwarding {
+            store.forwarding_ports += 1;
+        } else {
+            store.forwarding_ports -= 1;
+        }
+        let ports = &store.ports[..count];
+        if (0..count).any(|index| routes(ports, store.forwarding_ports, index)) {
+            store.drop_undrained();
+            store.out.push(Task::announce());
+        }
         Ok(())
     }
 

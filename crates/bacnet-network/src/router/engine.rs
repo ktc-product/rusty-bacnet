@@ -240,6 +240,7 @@ totals!(
     duplicate_drops,
     not_next_hop,
     originated,
+    not_routed,
     }
 );
 

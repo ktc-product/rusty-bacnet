@@ -76,6 +76,9 @@ pub struct Counters {
     /// Requests the router's own application sent through the engine
     /// ([`Router::originate`](super::Router::originate), #1699).
     pub originated: u32,
+    /// Frames a port that doesn't route dropped: an NPDU for another network,
+    /// or a network message ([`PortConfig::forwarding`](super::PortConfig::forwarding)).
+    pub not_routed: u32,
 }
 
 impl Counters {
@@ -112,6 +115,7 @@ impl Counters {
         duplicate_drops: 0,
         not_next_hop: 0,
         originated: 0,
+        not_routed: 0,
     };
 }
 

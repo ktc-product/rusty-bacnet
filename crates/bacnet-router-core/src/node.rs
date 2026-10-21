@@ -132,6 +132,17 @@ pub(crate) fn is_unconfirmed(apdu: &[u8]) -> bool {
     apdu.first().is_some_and(|&first| first >> 4 == 1)
 }
 
+/// Whether a node acts on `npdu`, by its DNET: `Some(global)` when it has no
+/// DNET or is a global broadcast, `None` when its DNET names one network,
+/// which makes it for a device elsewhere.
+pub(crate) fn for_this_node(npdu: &Npdu<'_>) -> Option<bool> {
+    match npdu.destination {
+        None => Some(false),
+        Some(destination) if destination.network == GLOBAL_NETWORK => Some(true),
+        Some(_) => None,
+    }
+}
+
 /// What a node does with a frame.
 ///
 /// Like the router's [`Received`](crate::router::Received), it stays
@@ -262,14 +273,9 @@ impl Node {
                 return Received::Discarded(refused.discard);
             }
         };
-        // Only a global broadcast is left with a DNET a node may act on.
-        let global = match npdu.destination {
-            None => false,
-            Some(destination) if destination.network == GLOBAL_NETWORK => true,
-            Some(_) => {
-                bump(&mut self.counters.routed_drops);
-                return Received::Discarded(Discard::NotRouted);
-            }
+        let Some(global) = for_this_node(&npdu) else {
+            bump(&mut self.counters.routed_drops);
+            return Received::Discarded(Discard::NotRouted);
         };
         if npdu.is_network_message() {
             return Received::Message(npdu);

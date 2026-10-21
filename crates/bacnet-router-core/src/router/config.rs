@@ -44,10 +44,21 @@ pub struct PortConfig<G = Groups> {
     pub max_npdu: NpduLimits,
     /// The link's destination classifier, supplied by its configuration.
     pub groups: G,
+    /// Whether the router forwards traffic to and from this port. It routes
+    /// when every port forwards, as by default, or when it does and another
+    /// port does too. On a port that doesn't route, the router's own
+    /// application still sends and receives, and the router still learns
+    /// from I-Am-Router, Reject-Message-To-Network, Router-Busy,
+    /// Router-Available and Network-Number-Is; it relays nothing to or from
+    /// the port and answers no router message there.
+    /// [`Router::set_port_forwarding`](super::Router::set_port_forwarding)
+    /// changes it while the router runs.
+    pub forwarding: bool,
 }
 
 impl<G> PortConfig<G> {
-    /// A port with its network, own MAC, limits and link group rule.
+    /// A port with its network, own MAC, limits and link group rule, which
+    /// forwards.
     #[must_use]
     pub const fn new(network: u16, mac: Mac, max_npdu: NpduLimits, groups: G) -> Self {
         Self {
@@ -55,6 +66,7 @@ impl<G> PortConfig<G> {
             mac,
             max_npdu,
             groups,
+            forwarding: true,
         }
     }
 }
@@ -66,7 +78,24 @@ impl<G: GroupClassifier> PortConfig<G> {
         mac: Mac::EMPTY,
         max_npdu: NpduLimits::both(0),
         groups: G::NONE,
+        forwarding: false,
     };
+}
+
+/// Whether the port at `index` among `ports`, of which `forwarding` forward,
+/// routes: every port forwards, as by default; or this one does and so does
+/// another, so there is somewhere to route to. Once a port is off, a router
+/// with fewer than two forwarding ports routes nothing (Clause 6.5.2).
+pub(super) fn routes<G>(ports: &[PortConfig<G>], forwarding: usize, index: usize) -> bool {
+    ports.get(index).is_some_and(|config| config.forwarding)
+        && (forwarding == ports.len() || forwarding >= 2)
+}
+
+/// Whether the port at `index` is one of `ports` that doesn't route. A port
+/// the router doesn't have isn't: a route naming one is left to the
+/// router's unknown-port handling.
+pub(super) fn closed<G>(ports: &[PortConfig<G>], forwarding: usize, index: usize) -> bool {
+    index < ports.len() && !routes(ports, forwarding, index)
 }
 
 /// A router's policy values and timers.
@@ -267,3 +296,22 @@ impl fmt::Display for LimitError {
 }
 
 impl core::error::Error for LimitError {}
+
+/// Why [`Router::set_port_forwarding`](super::Router::set_port_forwarding)
+/// refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForwardingError {
+    /// The router has no such port.
+    UnknownPort,
+}
+
+impl fmt::Display for ForwardingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnknownPort => "the router has no such port",
+        })
+    }
+}
+
+impl core::error::Error for ForwardingError {}
