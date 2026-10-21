@@ -70,6 +70,11 @@ impl<
         route: &Route,
         host: &mut impl Host,
     ) -> Received<'f> {
+        // Nothing crosses to or from a port that doesn't route.
+        if self.closed(usize::from(at.port.0)) || self.closed(usize::from(route.port().0)) {
+            bump(&mut self.counters.not_routed);
+            return Received::Discarded(Discard::NotRouted);
+        }
         let last_hop = !route.is_direct() && npdu.hop_count == 1;
         if npdu.hop_count == 0 || last_hop {
             return self.hop_count_spent(npdu, host);

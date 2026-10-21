@@ -72,6 +72,7 @@ pub mod control_policy;
 mod counters;
 mod dispatch;
 mod engine;
+mod forwarding;
 mod hosted_host;
 mod limits;
 mod local_control;
@@ -313,6 +314,7 @@ impl BACnetRouter {
             gate,
             control_tx,
             options.engine_options(),
+            options.not_forwarding_networks(),
         )
         .await?;
         Ok(StartedRouter {
@@ -503,6 +505,8 @@ mod envelope_discovery_tests;
 mod envelope_harness;
 #[cfg(test)]
 mod fixes_tests;
+#[cfg(test)]
+mod forwarding_tests;
 #[cfg(test)]
 mod hardening_tests;
 #[cfg(test)]

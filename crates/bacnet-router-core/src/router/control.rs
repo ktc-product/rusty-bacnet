@@ -182,7 +182,9 @@ impl<
     /// to one the table lacks, it is passed on to every other port with
     /// SNET and SADR, and no DNET. Scoped to one reached through the
     /// arrival port, it is left to the router there: the clause searches
-    /// only for a network the table lacks. Network 0 is refused.
+    /// only for a network the table lacks. Scoped to one reached through a
+    /// port that doesn't route, it is neither answered nor passed on.
+    /// Network 0 is refused.
     ///
     /// One whose SNET and SADR name the router itself is its own search
     /// come back round a loop, and is dropped (#2021). Nothing else bounds
@@ -208,7 +210,7 @@ impl<
             Ok(WhoIsRouter::Network(network)) => network,
         };
         match self.table.lookup(network) {
-            Some(route) if route.port() != at.port => {
+            Some(route) if route.port() != at.port && !self.closed(usize::from(route.port().0)) => {
                 self.out.push(Task::i_am_answer(at.port, Some(network)));
                 return Received::Handled;
             }
