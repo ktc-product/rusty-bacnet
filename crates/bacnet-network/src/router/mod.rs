@@ -90,7 +90,8 @@ use bacnet_npdu::Mac;
 pub use bacnet_router_core::router::{
     Congestion, Duplicates, OriginateError, Path, Request, SourceSelection,
 };
-use bacnet_router_core::{Instant, PortId};
+use bacnet_router_core::Instant;
+pub use bacnet_router_core::PortId;
 use bacnet_transport::port::{DataAttribute, TransportPort};
 use bacnet_types::error::Error;
 use bacnet_types::MacAddr;
@@ -599,6 +600,17 @@ impl BACnetRouter {
     /// time since the router started.
     pub fn now(&self) -> Instant {
         self.shared.engine.now()
+    }
+
+    /// The router's MAC on the port on `network`, as its transport gave it
+    /// at start, or `None` for a network no port is on.
+    pub fn local_mac(&self, network: u16) -> Option<MacAddr> {
+        let router = self.shared.engine.lock();
+        router
+            .ports()
+            .iter()
+            .find(|port| port.network == network)
+            .map(|port| MacAddr::from_slice(port.mac.as_slice()))
     }
 
     /// Stop the router.
