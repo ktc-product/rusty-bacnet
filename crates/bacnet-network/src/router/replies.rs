@@ -4,13 +4,15 @@ use std::sync::{
     Arc, Weak,
 };
 
+use bacnet_npdu::NetworkPriority;
 use bacnet_router_core::router::ReplyPlan;
-use bacnet_transport::port::{DirectResponseScope, ResponseScopeGuard};
+use bacnet_transport::port::{DirectResponse, DirectResponseScope, ResponseScopeGuard};
 use bacnet_types::{error::Error, MacAddr};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::sync::oneshot;
 
-use super::{dispatch::Outputs, SendRequest};
+use super::{dispatch::Outputs, BACnetRouter, SendRequest};
+use crate::response_route::ResponseRoute;
 
 #[derive(Debug, Default)]
 pub(crate) struct ReplyLifetime {
@@ -77,10 +79,34 @@ impl RouterResponse {
     pub(crate) fn check(&self) -> Result<(), Error> {
         self.lifetime()?.check()
     }
-    pub(crate) fn lifetime(&self) -> Result<Arc<ReplyLifetime>, Error> {
+    fn lifetime(&self) -> Result<Arc<ReplyLifetime>, Error> {
         let lifetime = self.lifetime.upgrade().ok_or_else(unavailable)?;
         lifetime.check()?;
         Ok(lifetime)
+    }
+    fn is_from(&self, router: &BACnetRouter) -> bool {
+        std::ptr::eq(self.lifetime.as_ptr(), Arc::as_ptr(&router.replies))
+    }
+    /// Sends `npdu` to the requester: over the request's direct connection when `direct` is
+    /// given, otherwise out the port the request came in on. Once `owner` is sealed, a reply not
+    /// yet sent is dropped.
+    pub(crate) async fn reply(
+        &self,
+        npdu: BytesMut,
+        priority: NetworkPriority,
+        direct: Option<&DirectResponse>,
+        owner: &DirectResponseScope,
+        on_issuance: impl FnOnce() + Send + 'static,
+    ) -> Result<(), Error> {
+        if let Some(direct) = direct {
+            let lifetime = self.lifetime()?;
+            on_issuance();
+            return direct
+                .send_with_owner(&npdu, owner, &lifetime.direct.guard())
+                .await;
+        }
+        self.send(npdu.freeze(), priority, owner.guard(), on_issuance)
+            .await
     }
     pub(crate) async fn send(
         &self,
@@ -119,6 +145,42 @@ impl RouterResponse {
                 .map_err(|_| unavailable())?;
         }
         completed.await.map_err(|_| unavailable())?
+    }
+}
+
+impl BACnetRouter {
+    /// Sends the response to a request this router delivered locally, back the way the request
+    /// came: to the requester on the port it arrived on, or through the router it came from. The
+    /// route from [`ReceivedApdu::response_route`](crate::layer::ReceivedApdu::response_route)
+    /// decides the addressing.
+    ///
+    /// Once `owner` is sealed or dropped, as its owner does when it stops, a response not yet
+    /// sent is dropped. `on_issuance` runs when the send starts; success doesn't mean the
+    /// response arrived.
+    ///
+    /// Refused for a route this router didn't capture, and after the router stops.
+    pub async fn send_response_apdu_on_issuance(
+        &self,
+        apdu: &[u8],
+        expecting_reply: bool,
+        priority: NetworkPriority,
+        route: &ResponseRoute,
+        owner: &DirectResponseScope,
+        on_issuance: impl FnOnce() + Send + 'static,
+    ) -> Result<(), Error> {
+        let router = route
+            .router()
+            .filter(|router| router.is_from(self))
+            .ok_or_else(|| {
+                Error::Transport(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the response route is not one this router captured",
+                ))
+            })?;
+        let npdu = route.encode(apdu, None, expecting_reply, priority)?;
+        router
+            .reply(npdu, priority, route.direct()?, owner, on_issuance)
+            .await
     }
 }
 

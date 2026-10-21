@@ -124,23 +124,8 @@ impl<T: TransportPort + 'static> NetworkLayer<T> {
         let buf = route.encode(apdu, destination, expecting_reply, priority)?;
         let direct = route.direct()?;
         if let Some(router) = route.router() {
-            // Retire the router route before either authority path; the
-            // temporary lifetime owner holds no engine, queue or socket.
-            let lifetime = router.lifetime()?;
-            if let Some(direct) = direct {
-                on_issuance();
-                return direct
-                    .send_with_owner(&buf, &self.response_scope, &lifetime.direct.guard())
-                    .await;
-            }
-            drop(lifetime);
             return router
-                .send(
-                    buf.freeze(),
-                    priority,
-                    self.response_scope.guard(),
-                    on_issuance,
-                )
+                .reply(buf, priority, direct, &self.response_scope, on_issuance)
                 .await;
         }
         on_issuance();

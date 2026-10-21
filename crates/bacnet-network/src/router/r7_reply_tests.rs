@@ -13,7 +13,7 @@ use super::{BACnetRouter, RouterOptions, RouterPort};
 use crate::layer::{IssuedApdu, NetworkLayer};
 
 #[derive(Clone)]
-struct Port {
+pub(super) struct Port {
     incoming: Arc<Mutex<Option<mpsc::Receiver<ReceivedNpdu>>>>,
     wire: mpsc::UnboundedSender<(Bytes, Vec<u8>)>,
     mac: [u8; 1],
@@ -43,9 +43,9 @@ impl TransportPort for Port {
     }
 }
 
-type WireReceiver = mpsc::UnboundedReceiver<(Bytes, Vec<u8>)>;
+pub(super) type WireReceiver = mpsc::UnboundedReceiver<(Bytes, Vec<u8>)>;
 
-fn port(mac: u8) -> (Port, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
+pub(super) fn port(mac: u8) -> (Port, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
     let (frames, incoming) = mpsc::channel(8);
     let (wire, sent) = mpsc::unbounded_channel();
     (
@@ -59,7 +59,7 @@ fn port(mac: u8) -> (Port, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
     )
 }
 
-fn address(network: u16, mac: &[u8]) -> NpduAddress {
+pub(super) fn address(network: u16, mac: &[u8]) -> NpduAddress {
     NpduAddress {
         network,
         mac_address: MacAddr::from_slice(mac),
