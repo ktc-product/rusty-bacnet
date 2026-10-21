@@ -66,7 +66,9 @@ impl BACnetRouter {
     /// like a port's dispatch of one frame, and never waits. A network the
     /// table lacks is refused with [`OriginateError::NoRoute`], and a
     /// Who-Is-Router for it goes out on every port, once per cooldown;
-    /// retry once it is learned. After [`Self::stop`] every call fails with
+    /// retry once it is learned. With [`Path::Via`](bacnet_router_core::router::Path::Via)
+    /// the request goes to the router it names, with no table lookup and
+    /// no search. After [`Self::stop`] every call fails with
     /// [`OriginateFailure::Stopped`].
     ///
     /// A global broadcast (DNET 0xFFFF) has no path here yet and is refused

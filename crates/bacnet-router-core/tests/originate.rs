@@ -5,7 +5,7 @@ mod fixture;
 
 use bacnet_router_core::npdu::{Address, NetworkMessageType, NetworkPriority, Npdu};
 use bacnet_router_core::router::{
-    Action, Cause, Kind, Options, OriginateError, Permissive, Request, SourceSelection,
+    Action, Cause, Kind, Options, OriginateError, Path, Permissive, Request, SourceSelection,
 };
 use bacnet_router_core::{Duration, Instant, PortId};
 use fixture::{
@@ -32,6 +32,16 @@ fn originate(
 
 fn request<'a>(network: u16, mac: &'a [u8], apdu: &'a [u8]) -> Request<'a> {
     Request::new(Address { network, mac }, apdu)
+}
+
+/// A confirmed request for node 5 on `network`, through `router` on `port`.
+fn via<'a>(network: u16, port: u8, router: &'a [u8]) -> Request<'a> {
+    let mut request = request(network, &[5], CONFIRMED);
+    request.path = Path::Via {
+        port: PortId(port),
+        router,
+    };
+    request
 }
 
 #[test]
@@ -112,6 +122,7 @@ fn what_it_refuses_sends_nothing() {
     learn_9_via_r7(&mut gone, Instant::ZERO);
     gone.table_mut().mark_unreachable(9);
     let long = vec![0x10; 1_495];
+    let too_long_mac = [0x08; 19];
     for (router, request, error) in [
         (
             &mut first,
@@ -152,6 +163,27 @@ fn what_it_refuses_sends_nothing() {
                 limit: 1_497,
             },
         ),
+        (
+            &mut with_9(),
+            via(2, 1, R7),
+            OriginateError::AttachedNetwork,
+        ),
+        (
+            &mut with_9(),
+            via(9, 1, &[]),
+            OriginateError::InvalidNextHop,
+        ),
+        (
+            &mut with_9(),
+            via(9, 1, OWN_1),
+            OriginateError::InvalidNextHop,
+        ),
+        (
+            &mut with_9(),
+            via(9, 1, &too_long_mac),
+            OriginateError::InvalidNextHop,
+        ),
+        (&mut with_9(), via(9, 3, R7), OriginateError::UnknownPort),
     ] {
         let (result, sent) = originate(router, &request, at(1));
         assert_eq!(result, Err(error));
@@ -183,6 +215,31 @@ fn no_route_searches_on_every_port_once_per_cooldown() {
     let later = Instant::from_secs(1) + cooldown + Duration::from_secs(1);
     let (_, sent) = originate(&mut router, &request(77, &[5], CONFIRMED), later);
     assert_eq!(sent.len(), 2);
+}
+
+#[test]
+fn a_pinned_next_hop_reaches_a_network_the_table_lacks_and_leaves_the_table_alone() {
+    let mut router = router();
+    let (result, sent) = originate(&mut router, &via(9, 1, R7), at(1));
+    assert_eq!(result, Ok(()));
+    assert_eq!(sent.len(), 1, "no Who-Is-Router");
+    let send = &sent[0];
+    assert_eq!((send.port, send.to.as_deref()), (1, Some(R7)));
+    assert_eq!(send.kind, Kind::Originate);
+    let npdu = send.parsed();
+    assert_eq!(npdu.destination, Some(addr(9, &[5])));
+    assert_eq!(npdu.hop_count, 255);
+    assert!(router.table().lookup(9).is_none());
+}
+
+#[test]
+fn a_pinned_next_hop_overrides_the_tables() {
+    let mut router = with_9();
+    let (result, sent) = originate(&mut router, &via(9, 1, &[0x08]), at(1));
+    assert_eq!(result, Ok(()));
+    assert_eq!(sent[0].to.as_deref(), Some(&[0x08][..]));
+    let route = router.table().lookup(9).expect("the learned route");
+    assert_eq!(route.next_hop().as_slice(), R7);
 }
 
 /// The reply to a request from the egress address comes back with no DNET

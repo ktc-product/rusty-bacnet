@@ -78,7 +78,7 @@ pub use duplicates::Duplicates;
 pub use groups::{Group, GroupClassifier, Groups};
 pub use host::{Claim, ControlClass, Event, Host, Permissive, Targets};
 pub use ingress::{Discard, Frame, Local, Received};
-pub use originate::{OriginateError, Request, SourceSelection};
+pub use originate::{OriginateError, Path, Request, SourceSelection};
 pub use output::{Action, Cause, Dest, Kind, Send, SendRefusal};
 pub use reject::RejectOrigin;
 pub use reply::{ReplyPlan, ReplyPlanError};
@@ -443,7 +443,8 @@ where
     /// Who-Is-Router on every port, and a busy or failed route is refused
     /// as the router refuses others' traffic for it. Like
     /// [`receive`](Self::receive), it drops what an earlier call left
-    /// unpolled.
+    /// unpolled. With [`Path::Via`] the request goes to the router it names,
+    /// with no table lookup, no search and no busy or failed check.
     ///
     /// A global broadcast (DNET 0xFFFF) is refused as
     /// [`OriginateError::ReservedNetwork`]: there is no engine path for one
