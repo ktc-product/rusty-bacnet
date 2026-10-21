@@ -96,7 +96,7 @@ use std::sync::atomic::AtomicU64;
 
 use bacnet_npdu::Mac;
 pub use bacnet_router_core::router::{
-    Congestion, Duplicates, OriginateError, Request, SourceSelection,
+    Congestion, Duplicates, OriginateError, Path, Request, SourceSelection,
 };
 use bacnet_router_core::{Instant, PortId};
 use bacnet_transport::port::{DataAttribute, TransportPort};

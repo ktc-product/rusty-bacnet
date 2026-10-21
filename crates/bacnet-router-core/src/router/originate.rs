@@ -27,8 +27,8 @@ use super::output::{Cause, Current, Kind, Target};
 use super::tasks::Task;
 use super::{Group, Storage};
 use crate::npdu::{Address, GLOBAL_NETWORK, NetworkPriority, Npdu};
-use crate::table::Reachability;
-use crate::{Instant, PortId};
+use crate::table::{Reachability, Route};
+use crate::{Instant, Mac, PortId};
 
 /// Which of the router's addresses a request it originates names as its
 /// source.
@@ -58,6 +58,23 @@ pub enum SourceSelection {
     Port(PortId),
 }
 
+/// How a request the router originates reaches its destination network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Path<'a> {
+    /// By the routing table. The default.
+    #[default]
+    Table,
+    /// To this router on this port, with no table lookup and nothing
+    /// written to the table: for a router the caller knows of that doesn't
+    /// answer Who-Is-Router.
+    Via {
+        /// The port the request leaves by.
+        port: PortId,
+        /// The next router's MAC there.
+        router: &'a [u8],
+    },
+}
+
 /// A request the router's own application sends.
 ///
 /// It is `#[non_exhaustive]`: build one with [`Request::new`] and set the
@@ -77,11 +94,13 @@ pub struct Request<'a> {
     pub priority: NetworkPriority,
     /// Which address of the router it comes from.
     pub source: SourceSelection,
+    /// How it reaches the destination network.
+    pub path: Path<'a>,
 }
 
 impl<'a> Request<'a> {
     /// `apdu` for `destination`, at Normal priority, expecting no reply,
-    /// from the egress port's address.
+    /// from the egress port's address, routed by the table.
     #[must_use]
     pub const fn new(destination: Address<'a>, apdu: &'a [u8]) -> Self {
         Self {
@@ -90,6 +109,7 @@ impl<'a> Request<'a> {
             expecting_reply: false,
             priority: NetworkPriority::Normal,
             source: SourceSelection::EgressPort,
+            path: Path::Table,
         }
     }
 }
@@ -133,6 +153,12 @@ pub enum OriginateError {
     },
     /// Longer than the scratch, or with a field no NPDU may carry.
     Unwritable,
+    /// [`Path::Via`] for a network on one of the router's own ports.
+    AttachedNetwork,
+    /// [`Path::Via`] naming no MAC, the router's own on that port, or one
+    /// too long for a MAC; or for a global broadcast, which goes out every
+    /// port.
+    InvalidNextHop,
 }
 
 impl fmt::Display for OriginateError {
@@ -155,6 +181,10 @@ impl fmt::Display for OriginateError {
                 write!(f, "a {octets}-octet NPDU over the egress port's {limit}")
             }
             Self::Unwritable => f.write_str("the request can't be written as an NPDU"),
+            Self::AttachedNetwork => {
+                f.write_str("a next hop for a network on one of the router's ports")
+            }
+            Self::InvalidNextHop => f.write_str("the next hop isn't another node's MAC"),
         }
     }
 }
@@ -206,25 +236,17 @@ impl<
             },
         };
         if global {
+            // A global broadcast goes out every port, so it takes no next hop.
+            if matches!(request.path, Path::Via { .. }) {
+                return Err(OriginateError::InvalidNextHop);
+            }
             return self.originate_global(request, from);
         }
         let dnet = destination.network;
-        let Some(route) = self.table.lookup(dnet) else {
-            if self
-                .discovery
-                .should_solicit(dnet, now, options.discovery_cooldown)
-            {
-                bump(&mut self.counters.solicitations);
-                self.out.push(Task::solicit(NO_PORT, dnet));
-            }
-            return Err(OriginateError::NoRoute);
+        let route = match request.path {
+            Path::Table => self.table_route(dnet, now, options)?,
+            Path::Via { port, router } => self.pinned_route(dnet, port, router, now)?,
         };
-        self.table.touch(dnet, now);
-        match self.table.effective_reachability(dnet, now) {
-            Some(Reachability::Busy) => return Err(OriginateError::Busy),
-            Some(Reachability::Unreachable) => return Err(OriginateError::Unreachable),
-            _ => {}
-        }
         let Some(egress) = self.ports[..ports].get(usize::from(route.port().0)) else {
             return Err(OriginateError::UnknownPort);
         };
@@ -354,5 +376,55 @@ impl<
         self.out.current = current;
         bump(&mut self.counters.originated);
         Ok(())
+    }
+
+    /// The table's route to `dnet`, searching for one when there is none.
+    fn table_route(
+        &mut self,
+        dnet: u16,
+        now: Instant,
+        options: &super::Options,
+    ) -> Result<Route, OriginateError> {
+        let Some(route) = self.table.lookup(dnet) else {
+            if self
+                .discovery
+                .should_solicit(dnet, now, options.discovery_cooldown)
+            {
+                bump(&mut self.counters.solicitations);
+                self.out.push(Task::solicit(NO_PORT, dnet));
+            }
+            return Err(OriginateError::NoRoute);
+        };
+        self.table.touch(dnet, now);
+        match self.table.effective_reachability(dnet, now) {
+            Some(Reachability::Busy) => Err(OriginateError::Busy),
+            Some(Reachability::Unreachable) => Err(OriginateError::Unreachable),
+            _ => Ok(route),
+        }
+    }
+
+    /// [`Path::Via`]'s route, checked and never stored.
+    fn pinned_route(
+        &self,
+        dnet: u16,
+        port: PortId,
+        router: &[u8],
+        now: Instant,
+    ) -> Result<Route, OriginateError> {
+        let Some(config) = self.ports[..self.port_count].get(usize::from(port.0)) else {
+            return Err(OriginateError::UnknownPort);
+        };
+        if self
+            .table
+            .lookup(dnet)
+            .is_some_and(|route| route.is_direct())
+        {
+            return Err(OriginateError::AttachedNetwork);
+        }
+        if router.is_empty() || router == config.mac.as_slice() {
+            return Err(OriginateError::InvalidNextHop);
+        }
+        let next_hop = Mac::from_slice(router).map_err(|_| OriginateError::InvalidNextHop)?;
+        Ok(Route::learned(port, next_hop, now))
     }
 }
