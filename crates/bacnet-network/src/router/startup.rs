@@ -9,6 +9,7 @@ impl BACnetRouter {
         control: Arc<control_policy::ControlGate>,
         network_control: Option<AdmissionSender<ReceivedNetworkControl>>,
         engine_options: bacnet_router_core::router::Options,
+        not_forwarding: &[u16],
     ) -> Result<(Self, mpsc::Receiver<ReceivedApdu>, QueueAdmissionCounters), Error> {
         if ports.is_empty() || ports.len() > PORTS {
             return Err(Error::Encoding(format!(
@@ -32,6 +33,14 @@ impl BACnetRouter {
                         port.network_number
                     )));
                 }
+            }
+            if let Some(network) = not_forwarding
+                .iter()
+                .find(|network| !seen.contains(*network))
+            {
+                return Err(Error::Encoding(format!(
+                    "No router port is on network {network}, so it can't start not forwarding"
+                )));
             }
         }
 
@@ -69,7 +78,7 @@ impl BACnetRouter {
                 // Read once the transport has started: MS/TP's grows with the
                 // extended frames routing turned on, and BACnet/SC's comes from
                 // its hub connection.
-                configs.push(Engine::port(
+                let mut config = Engine::port(
                     port.network_number,
                     mac,
                     port.transport.max_npdu(),
@@ -77,7 +86,9 @@ impl BACnetRouter {
                         groups: port.transport.group_destinations(),
                         local_broadcasts: port.transport.local_broadcast_destinations(),
                     },
-                ));
+                );
+                config.forwarding = !not_forwarding.contains(&port.network_number);
+                configs.push(config);
                 // Taken after that read; the task that follows it applies the
                 // value it holds first, so a change in between isn't lost.
                 limit_changes.push(port.transport.max_npdu_changes());

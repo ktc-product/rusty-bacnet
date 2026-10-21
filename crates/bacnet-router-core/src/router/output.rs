@@ -9,6 +9,7 @@
 //! queues at most two tasks, and a frame's own output always comes before
 //! them, so the queue never fills.
 
+use super::config::{closed, routes};
 use super::counters::bump;
 use super::host::{Event, Host};
 use super::tasks::{Task, TaskKind};
@@ -405,9 +406,9 @@ impl<
     }
 
     /// [`write_now`](Self::write_now) a frame's own fan-out to every port
-    /// but `except`. `host` hears of each port that will leave it out as too
-    /// long for its broadcast limit; the skip itself, and its count, come
-    /// when the send is polled.
+    /// that routes but `except`. `host` hears of each port that will leave
+    /// it out as too long for its broadcast limit; the skip itself, and its
+    /// count, come when the send is polled.
     pub(super) fn write_fan_out(
         &mut self,
         npdu: &Npdu<'_>,
@@ -420,9 +421,14 @@ impl<
         }
         let octets = self.out.current.len;
         let ports = &self.ports[..self.port_count];
+        let forwarding = self.forwarding_ports;
+        if closed(ports, forwarding, usize::from(except.0)) {
+            return true;
+        }
         for (index, config) in ports.iter().enumerate() {
             let limit = config.max_npdu.get(true);
-            if index != usize::from(except.0) && octets > limit {
+            if index != usize::from(except.0) && routes(ports, forwarding, index) && octets > limit
+            {
                 host.observe(Event::TooLong {
                     // At most 255 ports, so the index fits in a u8.
                     port: PortId(index as u8),
@@ -490,11 +496,21 @@ impl<
             bump(&mut self.counters.egress_too_long);
             return None;
         }
+        let forwarding = self.forwarding_ports;
+        // The router's own application's fan-out, from no port or from the
+        // port whose address it uses, may go on every port, as a node's
+        // may on its own link.
+        let own = current.tag == Tag::Originate || usize::from(current.port.0) >= ports.len();
+        // Nothing else crosses from a port that doesn't route.
+        if !own && closed(ports, forwarding, usize::from(current.port.0)) {
+            current.active = false;
+            return None;
+        }
         while usize::from(current.next) < ports.len() {
             // At most 255 ports, so the index fits in a u8.
             let port = PortId(current.next as u8);
             current.next += 1;
-            if port == current.port {
+            if port == current.port || (!own && !routes(ports, forwarding, usize::from(port.0))) {
                 continue;
             }
             if fits(port, true) {
