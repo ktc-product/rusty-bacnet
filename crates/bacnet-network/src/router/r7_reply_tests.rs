@@ -13,11 +13,11 @@ use tokio::sync::mpsc;
 use super::{BACnetRouter, RouterOptions, RouterPort};
 use crate::layer::{IssuedApdu, NetworkLayer};
 
-type WireReceiver = mpsc::UnboundedReceiver<(Bytes, Vec<u8>)>;
+pub(super) type WireReceiver = mpsc::UnboundedReceiver<(Bytes, Vec<u8>)>;
 
 /// A port at `mac` that hands the test each unicast it sends, and takes a
 /// broadcast without a trace.
-fn port(mac: u8) -> (TestTransport, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
+pub(super) fn port(mac: u8) -> (TestTransport, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
     let (frames, incoming) = mpsc::channel(8);
     let (wire, sent) = mpsc::unbounded_channel();
     (
@@ -35,7 +35,7 @@ fn port(mac: u8) -> (TestTransport, mpsc::Sender<ReceivedNpdu>, WireReceiver) {
     )
 }
 
-fn address(network: u16, mac: &[u8]) -> NpduAddress {
+pub(super) fn address(network: u16, mac: &[u8]) -> NpduAddress {
     NpduAddress {
         network,
         mac_address: MacAddr::from_slice(mac),
