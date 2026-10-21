@@ -135,33 +135,22 @@ impl<T: TransportPort + 'static> NetworkLayer<T> {
                 issued.priority,
             )?;
             let direct = route.direct()?;
-            // The direct (BACnet/SC) sends are boxed: inline, each is larger
-            // than the transport send, and a server's request handler would
-            // carry it for every reply (#1713).
+            // Boxed for the same reason: only a router's own application
+            // replies this way.
             if let Some(router) = route.router() {
-                // Retire the router route before either authority path; the
-                // temporary lifetime owner holds no engine, queue or socket.
-                let lifetime = router.lifetime()?;
-                if let Some(direct) = direct {
-                    on_issuance();
-                    return Box::pin(direct.send_with_owner(
-                        &buf,
-                        &self.response_scope,
-                        &lifetime.direct.guard(),
-                    ))
-                    .await;
-                }
-                drop(lifetime);
-                return router
-                    .send(
-                        buf.freeze(),
-                        issued.priority,
-                        self.response_scope.guard(),
-                        on_issuance,
-                    )
-                    .await;
+                return Box::pin(router.reply(
+                    buf,
+                    issued.priority,
+                    direct,
+                    &self.response_scope,
+                    on_issuance,
+                ))
+                .await;
             }
             on_issuance();
+            // The direct (BACnet/SC) send is boxed: inline, it is larger than
+            // the transport send, and a server's request handler would carry
+            // it for every reply (#1713).
             if let Some(direct) = direct {
                 return Box::pin(direct.send(&buf, &self.response_scope)).await;
             }
