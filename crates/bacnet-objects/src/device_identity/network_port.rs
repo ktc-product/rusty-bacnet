@@ -1,5 +1,5 @@
 //! Configured Network Port declarations, independent of a running transport.
-use crate::network_port::{BipPortConfig, NetworkPortObject};
+use crate::network_port::{BipPortConfig, MstpPortConfig, NetworkPortObject};
 use bacnet_types::{enums::NetworkType, error::Error, MacAddr};
 use std::net::Ipv4Addr;
 
@@ -12,17 +12,20 @@ use std::net::Ipv4Addr;
 pub struct NetworkPortEntry {
     /// Network-Port object instance (caller-stable; B/IP=1, SC=2 by convention).
     pub instance: u32,
-    /// Clause 12.56 Network_Type (IPV4=5 for B/IP, VIRTUAL=7 for SC/loopback).
+    /// Clause 12.56 Network_Type (IPV4=5 for B/IP, MSTP=2, VIRTUAL=7 for SC/loopback).
     pub network_type: u32,
     /// BACnet network number for this port.
     pub network_number: u32,
-    /// Port MAC (B/IP 6-byte IP+port, SC VMAC, loopback MAC).
+    /// Port MAC (B/IP 6-byte IP+port, MS/TP station, SC VMAC, loopback MAC).
     /// B/IP admission rejects a MAC inconsistent with the configured IP/UDP.
     pub mac: MacAddr,
     /// IPv4 octets for B/IP; zeros for SC/loopback.
     pub ip: [u8; 4],
     /// UDP port for B/IP; 0 for SC/loopback.
     pub udp_port: u16,
+    /// The MS/TP configuration, for Network_Type MSTP only. Its network
+    /// number and station must equal the entry's network number and MAC.
+    pub mstp: Option<MstpPortConfig>,
 }
 
 impl NetworkPortEntry {
@@ -52,6 +55,39 @@ impl NetworkPortEntry {
             mac,
             ip: o,
             udp_port,
+            mstp: None,
+        }
+    }
+
+    /// MS/TP entry for a master node at `config.station` on
+    /// `config.network_number` (no B/IP socket fields).
+    ///
+    /// ```
+    /// use bacnet_objects::device_identity::NetworkPortEntry;
+    /// use bacnet_objects::network_port::MstpPortConfig;
+    ///
+    /// let entry = NetworkPortEntry::mstp(
+    ///     3,
+    ///     MstpPortConfig {
+    ///         network_number: 2650,
+    ///         apdu_length: 480,
+    ///         station: 5,
+    ///         max_master: 127,
+    ///         max_info_frames: 1,
+    ///         baud_rate: 38_400,
+    ///     },
+    /// );
+    /// assert_eq!(entry.mac.as_slice(), [5]);
+    /// ```
+    pub fn mstp(instance: u32, config: MstpPortConfig) -> Self {
+        Self {
+            instance,
+            network_type: NetworkType::MSTP.to_raw(),
+            network_number: config.network_number.into(),
+            mac: MacAddr::from_slice(&[config.station]),
+            ip: [0; 4],
+            udp_port: 0,
+            mstp: Some(config),
         }
     }
 
@@ -85,6 +121,22 @@ impl NetworkPortEntry {
                     ..Default::default()
                 },
             )
+        } else if self.network_type == NetworkType::MSTP.to_raw() {
+            // As for B/IP: the entry's own fields and its MS/TP
+            // configuration must describe one port.
+            let config = self
+                .mstp
+                .filter(|config| {
+                    config.network_number == network_number
+                        && self.mac.as_slice() == [config.station]
+                })
+                .ok_or_else(|| {
+                    Error::Encoding(
+                        "MS/TP entry needs its configuration, with the entry's network and MAC"
+                            .into(),
+                    )
+                })?;
+            NetworkPortObject::new_mstp(self.instance, name, config)
         } else {
             NetworkPortObject::new_non_bip(
                 self.instance,
@@ -109,6 +161,7 @@ impl NetworkPortEntry {
             mac: MacAddr::from_slice(&vmac),
             ip: [0; 4],
             udp_port: 0,
+            mstp: None,
         }
     }
 }

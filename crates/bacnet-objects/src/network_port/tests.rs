@@ -347,3 +347,99 @@ fn non_bip_application_rows_do_not_claim_ipv4_fields() {
             .is_err()
     );
 }
+
+fn mstp_config() -> MstpPortConfig {
+    MstpPortConfig {
+        network_number: 2650,
+        apdu_length: 480,
+        station: 5,
+        max_master: 64,
+        max_info_frames: 4,
+        baud_rate: 38_400,
+    }
+}
+
+#[test]
+fn configured_mstp_master_reads_its_station_and_token_limits() {
+    let mut object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
+    for (p, expected) in [
+        (P::NETWORK_TYPE, PropertyValue::Enumerated(2)),
+        (P::PROTOCOL_LEVEL, PropertyValue::Enumerated(2)),
+        (P::NETWORK_NUMBER, PropertyValue::Unsigned(2650)),
+        (P::NETWORK_NUMBER_QUALITY, PropertyValue::Enumerated(3)),
+        (P::MAC_ADDRESS, PropertyValue::OctetString(vec![5])),
+        (P::APDU_LENGTH, PropertyValue::Unsigned(480)),
+        (P::MAX_MASTER, PropertyValue::Unsigned(64)),
+        (P::MAX_INFO_FRAMES, PropertyValue::Unsigned(4)),
+        (P::LINK_SPEED, PropertyValue::Real(38_400.0)),
+    ] {
+        assert_eq!(object.read_property(p, None).unwrap(), expected, "{p:?}");
+    }
+    for p in [P::BACNET_IP_MODE, P::IP_ADDRESS, P::BACNET_IP_UDP_PORT] {
+        error(object.read_property(p, None), ErrorCode::UNKNOWN_PROPERTY);
+    }
+    for p in [P::MAX_MASTER, P::MAX_INFO_FRAMES, P::MAC_ADDRESS] {
+        error(
+            object
+                .write_property(p, None, PropertyValue::Unsigned(1), None)
+                .map(|()| PropertyValue::Null),
+            ErrorCode::WRITE_ACCESS_DENIED,
+        );
+    }
+}
+
+#[test]
+fn configured_mstp_metadata_is_the_common_rows_and_the_masters_two() {
+    let object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
+    let expected: Vec<_> = ALL
+        .iter()
+        .copied()
+        .filter(|p| {
+            !matches!(
+                *p,
+                P::BACNET_IP_MODE
+                    | P::IP_ADDRESS
+                    | P::IP_DEFAULT_GATEWAY
+                    | P::IP_SUBNET_MASK
+                    | P::BACNET_IP_UDP_PORT
+                    | P::IP_DNS_SERVER
+            )
+        })
+        .chain([P::MAX_MASTER, P::MAX_INFO_FRAMES])
+        .collect();
+    assert_eq!(object.property_list().as_ref(), expected);
+    for p in [P::MAX_MASTER, P::MAX_INFO_FRAMES] {
+        assert!(object.required_properties().contains(&p), "{p:?}");
+    }
+}
+
+#[test]
+fn mstp_configuration_out_of_range_is_refused() {
+    for config in [
+        MstpPortConfig {
+            network_number: u16::MAX,
+            ..mstp_config()
+        },
+        MstpPortConfig {
+            apdu_length: 49,
+            ..mstp_config()
+        },
+        MstpPortConfig {
+            max_master: 128,
+            ..mstp_config()
+        },
+        MstpPortConfig {
+            station: 65,
+            ..mstp_config()
+        },
+        MstpPortConfig {
+            max_info_frames: 0,
+            ..mstp_config()
+        },
+    ] {
+        assert!(
+            NetworkPortObject::new_mstp(3, "trunk", config).is_err(),
+            "{config:?}"
+        );
+    }
+}

@@ -9,8 +9,10 @@
 //! from the transport (see `bip_mode`). A BBMD's BDT and registration
 //! setting, and a foreign device's BBMD and time-to-live, are writable, and
 //! wait for activation (`pending`).
-//! Non-B/IP snapshots expose only the common application rows;
-//! they do not claim a complete transport-specific SC, Ethernet or MS/TP profile.
+//! The MS/TP constructor adds a master node's Max_Master and
+//! Max_Info_Frames to the common application rows. Other non-B/IP
+//! snapshots expose only the common rows; they do not claim a complete
+//! transport-specific SC or Ethernet profile.
 
 use bacnet_types::enums::{NetworkType, ObjectType, PropertyIdentifier, Reliability};
 use bacnet_types::error::Error;
@@ -24,10 +26,12 @@ use crate::traits::BACnetObject;
 mod bip_config;
 mod bip_mode;
 mod metadata;
+mod mstp_config;
 mod pending;
 mod registration;
 use bacnet_types::network_number::NetworkNumber;
 pub use bip_config::BipPortConfig;
+pub use mstp_config::MstpPortConfig;
 
 /// A declared application-port snapshot, optionally associated with an owned link.
 pub struct NetworkPortObject {
@@ -42,6 +46,7 @@ pub struct NetworkPortObject {
     mac_address: MacAddr,
     apdu_length: u32,
     bip: Option<BipPortConfig>,
+    mstp: Option<MstpPortConfig>,
     /// The mode the last published owner reported; NORMAL until one
     /// publishes. Like the bind, it stays after that owner stops, until a
     /// new registration reserves the port.
@@ -79,6 +84,7 @@ impl NetworkPortObject {
             mac_address: mac,
             apdu_length: config.apdu_length,
             bip: Some(config),
+            mstp: None,
             mode: Default::default(),
             pending: Default::default(),
             activation: false,
@@ -116,6 +122,38 @@ impl NetworkPortObject {
             mac_address,
             apdu_length,
             bip: None,
+            mstp: None,
+            mode: Default::default(),
+            pending: Default::default(),
+            activation: false,
+            binding: std::sync::Weak::new(),
+        })
+    }
+
+    /// MS/TP snapshot of a master node (Clause 12.56, Network_Type MSTP):
+    /// the common application rows, the station as its one-octet
+    /// MAC_Address, Max_Master and Max_Info_Frames, and the baud rate as
+    /// Link_Speed. Configuration is read-only; reconstruct it to change.
+    pub fn new_mstp(
+        instance: u32,
+        name: impl Into<String>,
+        config: MstpPortConfig,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        Ok(Self {
+            oid: ObjectIdentifier::new(ObjectType::NETWORK_PORT, instance)?,
+            name: name.into(),
+            description: String::new(),
+            status_flags: StatusFlags::empty(),
+            out_of_service: false,
+            reliability: Reliability::NO_FAULT_DETECTED,
+            network_type: NetworkType::MSTP,
+            network_number: NetworkNumber::configured(config.network_number)
+                .expect("validated Network Number"),
+            mac_address: MacAddr::from_slice(&[config.station]),
+            apdu_length: config.apdu_length,
+            bip: None,
+            mstp: Some(config),
             mode: Default::default(),
             pending: Default::default(),
             activation: false,
@@ -158,10 +196,22 @@ impl BACnetObject for NetworkPortObject {
             )),
             P::MAC_ADDRESS => Ok(PropertyValue::OctetString(self.mac_address.to_vec())),
             P::APDU_LENGTH => Ok(PropertyValue::Unsigned(self.apdu_length.into())),
-            // Optional unknown rate, not a measured NIC speed (errata item 23).
-            P::LINK_SPEED => Ok(PropertyValue::Real(0.0)),
+            // Optional unknown rate, not a measured NIC speed (errata item 23);
+            // an MS/TP port's configured baud rate.
+            P::LINK_SPEED => Ok(PropertyValue::Real(
+                self.mstp.map_or(0.0, |config| config.baud_rate as f32),
+            )),
             P::CHANGES_PENDING => Ok(PropertyValue::Boolean(self.changes_pending())),
             _ => {
+                if let Some(config) = self.mstp {
+                    return match property {
+                        P::MAX_MASTER => Ok(PropertyValue::Unsigned(config.max_master.into())),
+                        P::MAX_INFO_FRAMES => {
+                            Ok(PropertyValue::Unsigned(config.max_info_frames.into()))
+                        }
+                        _ => Err(common::unknown_property_error()),
+                    };
+                }
                 let config = self
                     .bip
                     .as_ref()
