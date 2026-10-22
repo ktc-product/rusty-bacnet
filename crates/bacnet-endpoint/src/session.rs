@@ -75,6 +75,8 @@ use tokio::task::JoinHandle;
 #[path = "source_profile.rs"]
 mod source_profile;
 pub(crate) use source_profile::{RoutedBindings, check_link_bindings};
+#[path = "session_database.rs"]
+mod database;
 #[path = "session_seat.rs"]
 mod seat;
 #[path = "session_server_seat.rs"]
@@ -83,6 +85,7 @@ mod server_seat;
 pub(crate) mod source_reporter;
 #[path = "session_start.rs"]
 mod startup;
+pub(crate) use database::SessionDatabase;
 
 #[path = "device_writes.rs"]
 mod device_writes;

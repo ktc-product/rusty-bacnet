@@ -86,16 +86,16 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         };
         preparation.session.validate_segmentation().await?;
         preparation.session.prepare_identity().await?;
-        let device = preparation.session.validate_device_execution()?;
+        let device = preparation.session.validate_device_execution().await?;
         let routes = preparation.session.prepare_source_audit_reporter()?;
         // Bind the database to the identity's Device from here on, as a
         // server's is, even beside a lower one added later (#2227); with no
         // identity it keeps its lowest Device. A preflight that fails or is
         // cancelled after this releases the binding again (Drop).
-        preparation.session.bind_identity_device()?;
+        preparation.session.bind_identity_device().await;
         preparation.bound = true;
         preparation.session.prepare_registered_port().await?;
-        preparation.session.commit_device_profile(device);
+        preparation.session.commit_device_profile(device).await?;
         preparation.committed = true;
         Ok((device, routes))
     }
@@ -103,17 +103,14 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
 
 impl<T: TransportPort + 'static> EndpointSession<T> {
     /// Bind the startup database to the identity's Device, or release it to
-    /// the lowest Device without an identity. It takes the guard without
-    /// waiting: a database the application holds locked fails the preflight,
-    /// leaving the session ready to retry.
-    fn bind_identity_device(&mut self) -> Result<(), Error> {
+    /// the lowest Device without an identity. It waits for the guard, as the
+    /// other preflight steps do: a shared database's other holders release it
+    /// in turn. A caller must not hold the guard across
+    /// [`start`](Self::start).
+    async fn bind_identity_device(&mut self) {
         let device = self.identity.as_ref().map(|identity| identity.device_oid());
         if let Some(database) = &self.database {
-            database
-                .try_write()
-                .map_err(|_| Error::Encoding("endpoint database is locked at start".into()))?
-                .bind_local_device_internal(device);
+            database.write().await.bind_local_device_internal(device);
         }
-        Ok(())
     }
 }
