@@ -73,10 +73,10 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         };
         preparation.session.validate_segmentation().await?;
         preparation.session.prepare_identity().await?;
-        let device = preparation.session.validate_device_execution()?;
+        let device = preparation.session.validate_device_execution().await?;
         let routes = preparation.session.prepare_source_audit_reporter()?;
         preparation.session.prepare_registered_port().await?;
-        preparation.session.commit_device_profile(device);
+        preparation.session.commit_device_profile(device).await?;
         preparation.committed = true;
         Ok((device, routes))
     }

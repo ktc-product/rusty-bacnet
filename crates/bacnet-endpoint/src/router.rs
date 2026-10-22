@@ -30,13 +30,16 @@
 //!
 //! [`BACnetRouter`]: bacnet_network::router::BACnetRouter
 
+use std::sync::Arc;
+
 use bacnet_endpoint_core::endpoint_ingress::EndpointIngress;
 use bacnet_network::router::{RouterOptions, RouterPort};
 use bacnet_objects::database::ObjectDatabase;
 use bacnet_transport::port::TransportPort;
 use bacnet_types::error::Error;
+use tokio::sync::RwLock;
 
-use crate::session::{EndpointSession, SessionConfig, SessionRole};
+use crate::session::{EndpointSession, SessionConfig, SessionDatabase, SessionRole};
 
 /// Builder for an endpoint whose network layer is a router on several
 /// ports.
@@ -45,7 +48,7 @@ pub struct RouterEndpointBuilder<T: TransportPort + 'static> {
     options: RouterOptions,
     role: SessionRole,
     session: SessionConfig,
-    database: Option<ObjectDatabase>,
+    database: Option<SessionDatabase>,
     identity: Option<crate::identity::DeviceIdentity>,
     device_write_authorizer: Option<bacnet_server::mutation::MutationAuthorizer>,
     reinitialize: Option<bacnet_server::server::ReinitializeHandler>,
@@ -134,7 +137,15 @@ impl<T: TransportPort + 'static> RouterEndpointBuilder<T> {
 
     /// Attaches the object database for the server responder.
     pub fn database(mut self, db: ObjectDatabase) -> Self {
-        self.database = Some(db);
+        self.database = Some(SessionDatabase::Owned(Box::new(db)));
+        self
+    }
+
+    /// [`database`](Self::database) for one the caller keeps a handle on, so
+    /// a session rebuilt for a new set of ports serves the same objects; see
+    /// [`EndpointSession::with_shared_database`].
+    pub fn shared_database(mut self, db: Arc<RwLock<ObjectDatabase>>) -> Self {
+        self.database = Some(SessionDatabase::Shared(db));
         self
     }
 
@@ -237,7 +248,7 @@ impl<T: TransportPort + 'static> RouterEndpointBuilder<T> {
             self.session,
         )?;
         if let Some(db) = self.database {
-            endpoint = endpoint.with_database(db);
+            endpoint = db.attach(endpoint);
         }
         if let Some(id) = self.identity {
             endpoint = endpoint.device(id);

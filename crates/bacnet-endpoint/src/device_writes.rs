@@ -198,7 +198,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         Ok(())
     }
 
-    pub(super) fn validate_device_execution(&mut self) -> Result<Option<ObjectIdentifier>, Error> {
+    pub(super) async fn validate_device_execution(
+        &mut self,
+    ) -> Result<Option<ObjectIdentifier>, Error> {
         let writes = self.device_write_authorizer.is_some();
         let reinitialize = self.reinitialize.is_some();
         if self.reinit_password.is_some() && !reinitialize {
@@ -265,13 +267,12 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
         let Some((capability, subject)) = capability else {
             return Ok(None);
         };
-        let db = self
-            .database
-            .as_mut()
-            .ok_or_else(|| Error::Encoding(format!("{subject} an attached local database")))?;
-        let db = Arc::get_mut(db)
-            .expect("database is unshared before startup")
-            .get_mut();
+        let database = Arc::clone(
+            self.database
+                .as_ref()
+                .ok_or_else(|| Error::Encoding(format!("{subject} an attached local database")))?,
+        );
+        let mut db = database.write().await;
         // The target is the selected Device, the one wildcard reads resolve
         // to, and it must be concrete.
         let oid = db
@@ -301,20 +302,26 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     }
 
     // All fallible configuration validation (including source ownership) precedes
-    // this commit. No await/callback or second copy of Device state is involved.
-    pub(super) fn commit_device_profile(&mut self, target: Option<ObjectIdentifier>) {
-        let Some(oid) = target else { return };
+    // this commit. The only await is for the lock; no callback or second copy of
+    // Device state is involved. A shared database's holder can remove the
+    // Device after validation, which fails here rather than panicking.
+    pub(super) async fn commit_device_profile(
+        &mut self,
+        target: Option<ObjectIdentifier>,
+    ) -> Result<(), Error> {
+        let Some(oid) = target else { return Ok(()) };
         let services = self.executed_services();
-        let db = Arc::get_mut(self.database.as_mut().expect("validated database"))
-            .expect("database is unshared before startup")
-            .get_mut();
+        let database = Arc::clone(self.database.as_ref().expect("validated database"));
+        let mut db = database.write().await;
         db.get_mut(&oid)
-            .expect("validated Device")
-            .device_authority_internal()
-            .expect("validated Device authority")
+            .and_then(|object| object.device_authority_internal())
+            .ok_or_else(|| {
+                Error::Encoding("the local Device left the database while starting".into())
+            })?
             .set_services_supported(&services);
         if let Some(identity) = self.identity.take() {
             self.identity = Some(identity.with_services(&services));
         }
+        Ok(())
     }
 }

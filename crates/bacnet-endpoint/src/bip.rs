@@ -37,13 +37,15 @@
 //! ```
 
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::Arc;
 
 use bacnet_objects::database::ObjectDatabase;
 use bacnet_transport::bip::{BipMode, BipTransport};
 use bacnet_types::error::Error;
 use bacnet_types::primitives::ObjectIdentifier;
+use tokio::sync::RwLock;
 
-use crate::session::{EndpointSession, SessionConfig, SessionRole};
+use crate::session::{EndpointSession, SessionConfig, SessionDatabase, SessionRole};
 
 /// Concrete B/IP endpoint builder.
 ///
@@ -57,7 +59,7 @@ pub struct BipEndpointBuilder {
     share_port_by_address: bool,
     role: SessionRole,
     session: SessionConfig,
-    database: Option<ObjectDatabase>,
+    database: Option<SessionDatabase>,
     registered_network_port: Option<ObjectIdentifier>,
     identity: Option<crate::identity::DeviceIdentity>,
     device_write_authorizer: Option<bacnet_server::mutation::MutationAuthorizer>,
@@ -159,7 +161,14 @@ impl BipEndpointBuilder {
     /// Build it from the same identity passed to
     /// [`device`](Self::device) so Device readback agrees with I-Am.
     pub fn database(mut self, db: ObjectDatabase) -> Self {
-        self.database = Some(db);
+        self.database = Some(SessionDatabase::Owned(Box::new(db)));
+        self
+    }
+
+    /// [`database`](Self::database) for one the caller keeps a handle on;
+    /// see [`EndpointSession::with_shared_database`].
+    pub fn shared_database(mut self, db: Arc<RwLock<ObjectDatabase>>) -> Self {
+        self.database = Some(SessionDatabase::Shared(db));
         self
     }
 
@@ -374,7 +383,7 @@ impl BipEndpointBuilder {
         let mut endpoint = EndpointSession::new(transport, role, session)?;
         endpoint.bip_status = Some(bip_status);
         if let Some(db) = database {
-            endpoint = endpoint.with_database(db);
+            endpoint = db.attach(endpoint);
         }
         if let Some(id) = identity {
             endpoint = endpoint.device(id);

@@ -64,9 +64,14 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             Error::Encoding("source Audit Reporter requires an attached local database".into())
         })?;
         // Ready sessions have not shared the Arc with a responder. Synchronous,
-        // exclusive validation has no await/cancellation or concurrent mutation.
+        // exclusive validation has no await/cancellation or concurrent mutation,
+        // so it needs a database the session alone holds.
         let db = Arc::get_mut(db)
-            .expect("database is unshared before startup")
+            .ok_or_else(|| {
+                Error::Encoding(
+                    "source Audit Reporter requires a database the session alone holds".into(),
+                )
+            })?
             .get_mut();
         // The local Device is the audit identity. Source ownership refuses any
         // new Device and keeps this one, so it stays the lowest while owned.

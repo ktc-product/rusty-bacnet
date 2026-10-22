@@ -4,16 +4,20 @@
 //! Network 1 is the router endpoint's own link, with node A on it. Networks
 //! 2 and 3 are trunks, each with a node at station 5: B on 2, C on 3.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bacnet_endpoint::router::RouterEndpointBuilder;
 use bacnet_endpoint::session::{EndpointSession, SessionConfig, SessionRole};
 use bacnet_endpoint::{DeviceIdentity, EndpointApduDestination};
+use bacnet_objects::analog::AnalogInputObject;
+use bacnet_objects::database::ObjectDatabase;
 use bacnet_transport::loopback::LoopbackTransport;
-use bacnet_types::enums::{ObjectType, PropertyIdentifier};
+use bacnet_types::enums::{EngineeringUnits, ObjectType, PropertyIdentifier};
 use bacnet_types::error::Error;
 use bacnet_types::primitives::ObjectIdentifier;
 use bacnet_types::MacAddr;
+use tokio::sync::RwLock;
 
 const ROUTER_MAC: u8 = 0x01;
 const NODE_A: u8 = 0x0A;
@@ -167,4 +171,65 @@ async fn a_trunk_that_does_not_forward_is_not_reachable_through_the_router() {
 fn a_router_endpoint_needs_a_port() {
     let builder = RouterEndpointBuilder::<LoopbackTransport>::new();
     assert!(builder.build_session().is_err());
+}
+
+type SharedDatabase = Arc<RwLock<ObjectDatabase>>;
+
+/// The object node `session` reads at `object` on the router's own link.
+async fn object_at(
+    session: &EndpointSession<LoopbackTransport>,
+    object: ObjectIdentifier,
+) -> Result<ObjectIdentifier, Error> {
+    let ack = session
+        .client()
+        .unwrap()
+        .read_property(&[ROUTER_MAC], object, PropertyIdentifier::OBJECT_NAME, None)
+        .await?;
+    Ok(ack.object_identifier)
+}
+
+/// A router endpoint serving `database`, started, with node A on its own link.
+async fn serving(
+    database: &SharedDatabase,
+) -> (
+    EndpointSession<LoopbackTransport>,
+    EndpointSession<LoopbackTransport>,
+) {
+    let (home, a) = LoopbackTransport::pair(vec![ROUTER_MAC], vec![NODE_A]);
+    let (trunk, _trunk_peer) = LoopbackTransport::pair(vec![ROUTER_MAC], vec![STATION]);
+    let mut router = RouterEndpointBuilder::new()
+        .port(1, home, true)
+        .port(2, trunk, false)
+        .client_timers(500, 0)
+        .device(DeviceIdentity::new(ROUTER_DEVICE, 42).unwrap())
+        .shared_database(database.clone())
+        .multiple_reads()
+        .file_reads()
+        .build_session()
+        .unwrap();
+    router.start().await.unwrap();
+    let mut a = node(a, A_DEVICE);
+    a.start().await.unwrap();
+    (router, a)
+}
+
+#[tokio::test]
+async fn a_session_rebuilt_over_a_shared_database_serves_what_the_first_served() {
+    let database: SharedDatabase = Arc::new(RwLock::new(
+        DeviceIdentity::new(ROUTER_DEVICE, 42)
+            .unwrap()
+            .build_database()
+            .unwrap(),
+    ));
+    let (mut first, a) = serving(&database).await;
+    let added = ObjectIdentifier::new(ObjectType::ANALOG_INPUT, 7).unwrap();
+    let input =
+        AnalogInputObject::new(7, "added-after-start", EngineeringUnits::DEGREES_CELSIUS).unwrap();
+    database.write().await.add(Box::new(input)).unwrap();
+    assert_eq!(object_at(&a, added).await.unwrap(), added);
+    first.stop().await.unwrap();
+
+    let (_second, a) = serving(&database).await;
+
+    assert_eq!(object_at(&a, added).await.unwrap(), added);
 }
