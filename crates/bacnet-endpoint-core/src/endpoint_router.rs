@@ -96,6 +96,24 @@ pub(super) struct RouterService {
 }
 
 impl RouterService {
+    /// `received` as the endpoint's roles see it: an APDU from a station on a
+    /// port other than the first, with no SNET, names that port's network
+    /// and the station's MAC as its SNET and SADR, as a router between that
+    /// network and the endpoint's own would. Every role then keys the
+    /// station as a routed peer, which a `Routed` send to that network and
+    /// MAC reaches, and one MAC on two ports is two peers.
+    pub(super) fn delivered(&self, mut received: ReceivedApdu) -> ReceivedApdu {
+        if let (None, Some(network)) = (&received.source_network, received.ingress_network) {
+            if network != self.home {
+                received.source_network = Some(bacnet_encoding::npdu::NpduAddress {
+                    network,
+                    mac_address: received.source_mac.clone(),
+                });
+            }
+        }
+        received
+    }
+
     /// Whether `received` came from a link-layer address that is a group
     /// destination on its arrival port.
     pub(super) fn is_group_source(&self, received: &ReceivedApdu) -> bool {

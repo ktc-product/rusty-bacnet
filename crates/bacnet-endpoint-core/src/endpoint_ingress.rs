@@ -188,7 +188,10 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// own link: its network is the endpoint's local network, and a direct
     /// send, or a routed one through a named router, leaves by it. The
     /// router answers network-number queries on every port, so
-    /// [`IngressReceivers::network_controls`] is `None`.
+    /// [`IngressReceivers::network_controls`] is `None`. An APDU from a
+    /// station on another port arrives with that port's network and the
+    /// station's MAC as its [`source_network`](ReceivedApdu::source_network),
+    /// so roles key it as a routed peer, one per port.
     ///
     /// Fails with no ports; [`Self::start`] fails as
     /// [`BACnetRouter::start`](bacnet_network::router::BACnetRouter::start)
@@ -467,6 +470,15 @@ enum Running<T: TransportPort> {
 }
 
 impl<T: TransportPort + 'static> Running<T> {
+    /// `received` as the endpoint's roles see it
+    /// ([`router::RouterService::delivered`] for a router).
+    fn delivered(&self, received: ReceivedApdu) -> ReceivedApdu {
+        match self {
+            Self::Link(_) => received,
+            Self::Router(router) => router.delivered(received),
+        }
+    }
+
     /// Whether `received` came from a link-layer address that is a group
     /// destination where it arrived.
     fn is_group_source(&self, received: &ReceivedApdu) -> bool {
@@ -918,6 +930,7 @@ fn route_received<T: TransportPort + 'static>(
         terminal_tx,
         policy_tx,
     } = queues;
+    let received = network.delivered(received);
     let route = match classify(&received, |received| network.is_group_source(received)) {
         Ok(route) => route,
         Err(reason) => return send_policy(policy_tx, PolicyOutcome { reason, received }),
