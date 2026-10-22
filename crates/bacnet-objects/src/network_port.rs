@@ -11,8 +11,10 @@
 //! device's BBMD and time-to-live, are writable when the transport can
 //! change them, and wait for activation (`pending`), as is a B/IP port's
 //! multicast group (`multicast`).
-//! Other snapshots expose only the common application rows;
-//! they do not claim a complete transport-specific SC, Ethernet or MS/TP profile.
+//! The MS/TP constructor adds a master node's Max_Master and
+//! Max_Info_Frames to the common application rows. Other snapshots expose
+//! only the common rows; they do not claim a complete transport-specific SC
+//! or Ethernet profile.
 
 use crate::prelude::*;
 use alloc::borrow::Cow;
@@ -29,6 +31,7 @@ mod bip_config;
 mod bip_mode;
 mod ip_config;
 mod metadata;
+mod mstp_config;
 mod multicast;
 mod pending;
 mod registration;
@@ -38,6 +41,7 @@ pub(crate) use bip6_config::Bip6Bind;
 pub use bip6_config::Bip6PortConfig;
 use ip_config::IpConfig;
 pub(crate) use ip_config::{PortAddress, PortBind};
+pub use mstp_config::MstpPortConfig;
 
 /// A declared application-port snapshot, optionally associated with an owned link.
 pub struct NetworkPortObject {
@@ -53,6 +57,8 @@ pub struct NetworkPortObject {
     apdu_length: u32,
     /// The B/IP or B/IPv6 profile; `None` for the other network types.
     ip: Option<IpConfig>,
+    /// The MS/TP master profile; `None` for the other network types.
+    mstp: Option<MstpPortConfig>,
     /// The mode the last published owner reported; NORMAL until one
     /// publishes. Like the bind, it stays after that owner stops, until a
     /// new registration reserves the port.
@@ -106,6 +112,7 @@ impl NetworkPortObject {
             mac_address: config.mac(),
             apdu_length: config.apdu_length(),
             ip: Some(config),
+            mstp: None,
             mode: Default::default(),
             pending: Default::default(),
             activation: false,
@@ -145,6 +152,39 @@ impl NetworkPortObject {
             mac_address,
             apdu_length,
             ip: None,
+            mstp: None,
+            mode: Default::default(),
+            pending: Default::default(),
+            activation: false,
+            multicast: Default::default(),
+            binding: alloc::sync::Weak::new(),
+        })
+    }
+
+    /// MS/TP snapshot of a master node (Clause 12.56, Network_Type MSTP):
+    /// the common application rows, the station as its one-octet
+    /// MAC_Address, Max_Master and Max_Info_Frames, and the baud rate as
+    /// Link_Speed. Configuration is read-only; reconstruct it to change.
+    pub fn new_mstp(
+        instance: u32,
+        name: impl Into<String>,
+        config: MstpPortConfig,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        Ok(Self {
+            oid: ObjectIdentifier::new(ObjectType::NETWORK_PORT, instance)?,
+            name: name.into(),
+            description: String::new(),
+            status_flags: StatusFlags::empty(),
+            out_of_service: false,
+            reliability: Reliability::NO_FAULT_DETECTED,
+            network_type: NetworkType::MSTP,
+            network_number: NetworkNumber::configured(config.network_number)
+                .expect("validated Network Number"),
+            mac_address: MacAddr::from_slice(&[config.station]),
+            apdu_length: config.apdu_length,
+            ip: None,
+            mstp: Some(config),
             mode: Default::default(),
             pending: Default::default(),
             activation: false,
@@ -189,10 +229,22 @@ impl BACnetObject for NetworkPortObject {
             )),
             P::MAC_ADDRESS => Ok(PropertyValue::OctetString(self.mac_address.to_vec())),
             P::APDU_LENGTH => Ok(PropertyValue::Unsigned(self.apdu_length.into())),
-            // Zero says the rate is unknown (Clause 12.56); no NIC speed is measured.
-            P::LINK_SPEED => Ok(PropertyValue::Real(0.0)),
+            // An MS/TP port's configured baud rate; otherwise zero, which says
+            // the rate is unknown (Clause 12.56): no NIC speed is measured.
+            P::LINK_SPEED => Ok(PropertyValue::Real(
+                self.mstp.map_or(0.0, |config| config.baud_rate as f32),
+            )),
             P::CHANGES_PENDING => Ok(PropertyValue::Boolean(self.changes_pending())),
             _ => {
+                if let Some(config) = self.mstp {
+                    return match property {
+                        P::MAX_MASTER => Ok(PropertyValue::Unsigned(config.max_master.into())),
+                        P::MAX_INFO_FRAMES => {
+                            Ok(PropertyValue::Unsigned(config.max_info_frames.into()))
+                        }
+                        _ => Err(common::unknown_property_error()),
+                    };
+                }
                 let config = self
                     .ip
                     .as_ref()
