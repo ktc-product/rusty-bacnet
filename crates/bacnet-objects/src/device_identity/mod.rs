@@ -4,7 +4,7 @@ use crate::prelude::*;
 use crate::{
     database::ObjectDatabase,
     device::{DeviceConfig, DeviceObject},
-    network_port::{Bip6PortConfig, BipPortConfig},
+    network_port::{Bip6PortConfig, BipPortConfig, MstpPortConfig},
     traits::BACnetObject,
 };
 use bacnet_types::{
@@ -144,7 +144,8 @@ impl DeviceIdentity {
     /// Rejects duplicate instances and out-of-range Network-Port instances
     /// and invalid profile configuration.
     /// Prefer [`with_bip_port`](Self::with_bip_port),
-    /// [`with_bip6_port`](Self::with_bip6_port) or
+    /// [`with_bip6_port`](Self::with_bip6_port),
+    /// [`with_mstp_port`](Self::with_mstp_port) or
     /// [`with_sc_port`](Self::with_sc_port), which encode the population rule.
     pub fn with_network_port(mut self, entry: NetworkPortEntry) -> Result<Self, Error> {
         entry.build_object()?;
@@ -203,6 +204,11 @@ impl DeviceIdentity {
         vmac: [u8; 6],
     ) -> Result<Self, Error> {
         self.with_network_port(NetworkPortEntry::sc(instance, network_number, vmac))
+    }
+
+    /// Adds an MS/TP master's port entry.
+    pub fn with_mstp_port(self, instance: u32, config: MstpPortConfig) -> Result<Self, Error> {
+        self.with_network_port(NetworkPortEntry::mstp(instance, config))
     }
 
     /// The identity's entry for the selected port, checked as a

@@ -1,5 +1,5 @@
 //! Configured Network Port declarations, independent of a running transport.
-use crate::network_port::{Bip6PortConfig, BipPortConfig, NetworkPortObject};
+use crate::network_port::{Bip6PortConfig, BipPortConfig, MstpPortConfig, NetworkPortObject};
 use bacnet_types::{MacAddr, enums::NetworkType, error::Error};
 use core::net::{Ipv4Addr, Ipv6Addr};
 
@@ -13,13 +13,13 @@ pub struct NetworkPortEntry {
     /// Network-Port object instance (caller-stable; B/IP=1, SC=2 by convention).
     pub instance: u32,
     /// Clause 12.56 Network_Type (IPV4=5 for B/IP, IPV6=9 for B/IPv6,
-    /// VIRTUAL=7 for SC/loopback).
+    /// MSTP=2, VIRTUAL=7 for SC/loopback).
     pub network_type: u32,
     /// BACnet network number for this port.
     pub network_number: u32,
-    /// Port MAC (B/IP 6-byte IP+port, B/IPv6 3-byte VMAC, SC VMAC,
-    /// loopback MAC). B/IP admission rejects a MAC inconsistent with the
-    /// configured IP/UDP.
+    /// Port MAC (B/IP 6-byte IP+port, B/IPv6 3-byte VMAC, MS/TP station,
+    /// SC VMAC, loopback MAC). B/IP admission rejects a MAC inconsistent
+    /// with the configured IP/UDP.
     pub mac: MacAddr,
     /// IPv4 octets for B/IP; zeros otherwise.
     pub ip: [u8; 4],
@@ -27,6 +27,9 @@ pub struct NetworkPortEntry {
     pub ipv6: [u8; 16],
     /// UDP port for B/IP and B/IPv6; 0 for SC/loopback.
     pub udp_port: u16,
+    /// The MS/TP configuration, for Network_Type MSTP only. Its network
+    /// number and station must equal the entry's network number and MAC.
+    pub mstp: Option<MstpPortConfig>,
 }
 
 impl NetworkPortEntry {
@@ -57,6 +60,7 @@ impl NetworkPortEntry {
             ip: o,
             ipv6: [0; 16],
             udp_port,
+            mstp: None,
         }
     }
 
@@ -95,6 +99,40 @@ impl NetworkPortEntry {
             ip: [0; 4],
             ipv6: ip.octets(),
             udp_port,
+            mstp: None,
+        }
+    }
+
+    /// MS/TP entry for a master node at `config.station` on
+    /// `config.network_number` (no B/IP socket fields).
+    ///
+    /// ```
+    /// use bacnet_objects::device_identity::NetworkPortEntry;
+    /// use bacnet_objects::network_port::MstpPortConfig;
+    ///
+    /// let entry = NetworkPortEntry::mstp(
+    ///     3,
+    ///     MstpPortConfig {
+    ///         network_number: 2650,
+    ///         apdu_length: 480,
+    ///         station: 5,
+    ///         max_master: 127,
+    ///         max_info_frames: 1,
+    ///         baud_rate: 38_400,
+    ///     },
+    /// );
+    /// assert_eq!(entry.mac.as_slice(), [5]);
+    /// ```
+    pub fn mstp(instance: u32, config: MstpPortConfig) -> Self {
+        Self {
+            instance,
+            network_type: NetworkType::MSTP.to_raw(),
+            network_number: config.network_number.into(),
+            mac: MacAddr::from_slice(&[config.station]),
+            ip: [0; 4],
+            ipv6: [0; 16],
+            udp_port: 0,
+            mstp: Some(config),
         }
     }
 
@@ -146,6 +184,20 @@ impl NetworkPortEntry {
                     ..Default::default()
                 },
             )
+        } else if self.network_type == NetworkType::MSTP.to_raw() {
+            // There is no generic MS/TP port, only a master's with its
+            // configuration.
+            let config = self
+                .mstp
+                .ok_or_else(crate::common::value_out_of_range_error)?;
+            // As for B/IP: the entry's own fields and its MS/TP
+            // configuration must describe one port.
+            if config.network_number != network_number || self.mac.as_slice() != [config.station] {
+                return Err(Error::Encoding(
+                    "MS/TP entry's network and MAC must match its configuration".into(),
+                ));
+            }
+            NetworkPortObject::new_mstp(self.instance, name, config)
         } else {
             NetworkPortObject::new_non_bip(
                 self.instance,
@@ -171,6 +223,7 @@ impl NetworkPortEntry {
             ip: [0; 4],
             ipv6: [0; 16],
             udp_port: 0,
+            mstp: None,
         }
     }
 

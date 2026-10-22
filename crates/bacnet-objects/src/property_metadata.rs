@@ -115,6 +115,9 @@ pub enum PropertyPresenceCondition {
     /// An IPv6 port, which requires its address, prefix length, gateway and
     /// DNS servers (Table 12-71 footnote 15, #2191).
     Ipv6Port,
+    /// An MS/TP port of a master node, which requires Max_Master and
+    /// Max_Info_Frames (135-2024 Table 12-71.6 footnote 4).
+    MstpMaster,
     /// The object reports COV, which its table's footnote makes the condition
     /// for COV_Increment (and for a Pulse Converter's COV_Period too): the
     /// analog types, Loop, Pulse Converter, the numeric value types, Lighting
@@ -224,6 +227,7 @@ impl PropertyMetadata {
                         | PropertyPresenceCondition::ForeignDeviceMode
                         | PropertyPresenceCondition::BacnetIpv6Application
                         | PropertyPresenceCondition::Ipv6Port
+                        | PropertyPresenceCondition::MstpMaster
                         | PropertyPresenceCondition::CovReporting
                         | PropertyPresenceCondition::PresentValueWritableInService
                 )

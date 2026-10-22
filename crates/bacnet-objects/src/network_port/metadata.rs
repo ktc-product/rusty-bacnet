@@ -4,8 +4,8 @@ use crate::property_metadata::{
     PropertyMetadata,
     PropertyPresenceCondition::{
         ApplicationProtocolLevel, BacnetIpMulticast, BacnetIpPort, BacnetIpv6Application,
-        BbmdCapable, ForeignDeviceMode, Ipv6Port, NatTraversalCapable, NatTraversalConfigured,
-        NotPointToPoint,
+        BbmdCapable, ForeignDeviceMode, Ipv6Port, MstpMaster, NatTraversalCapable,
+        NatTraversalConfigured, NotPointToPoint,
     },
     PropertyWriteCapability::{Always, ReadOnly},
 };
@@ -104,6 +104,12 @@ const BIP6: &[PropertyMetadata] = &[
         ReadOnly,
     ),
     PropertyMetadata::new(P::IPV6_DNS_SERVER, Optional, Some(Ipv6Port), ReadOnly),
+];
+// 135-2024 Table 12-71.6 footnote 4: an MS/TP port of a master node has
+// these. Read-only, as the other configured rows are.
+const MSTP: &[PropertyMetadata] = &[
+    PropertyMetadata::new(P::MAX_MASTER, Optional, Some(MstpMaster), ReadOnly),
+    PropertyMetadata::new(P::MAX_INFO_FRAMES, Optional, Some(MstpMaster), ReadOnly),
 ];
 // Table 12-71 footnotes 11 and 12 (IPV4 or IPV6): a port that can act as a BBMD has these;
 // the informative Table 12-72 lists them for BBMD mode. A port counts as
@@ -235,6 +241,8 @@ pub(super) fn for_object(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadat
                 })
                 .collect(),
         )
+    } else if object.mstp.is_some() {
+        Cow::Owned(COMMON.iter().chain(MSTP).copied().collect())
     } else {
         Cow::Borrowed(COMMON)
     }
