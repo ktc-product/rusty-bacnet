@@ -85,4 +85,7 @@ pub struct Counters {
     /// Frames a port that doesn't forward dropped: an NPDU for another
     /// network, or a network message.
     pub not_routed: u64,
+    /// Link broadcasts for a network whose route goes back out the port
+    /// they arrived on, left to the router there.
+    pub behind_arrival_port: u64,
 }

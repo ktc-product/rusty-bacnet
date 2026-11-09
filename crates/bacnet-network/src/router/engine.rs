@@ -242,6 +242,7 @@ totals!(
     not_next_hop,
     originated,
     not_routed,
+    behind_arrival_port,
     }
 );
 

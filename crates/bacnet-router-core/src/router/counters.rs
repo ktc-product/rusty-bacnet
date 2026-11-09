@@ -87,6 +87,9 @@ pub struct Counters {
     /// Frames a port that doesn't route dropped: an NPDU for another network,
     /// or a network message ([`PortConfig::forwarding`](super::PortConfig::forwarding)).
     pub not_routed: u32,
+    /// Link broadcasts for a network whose route goes back out the port
+    /// they arrived on, left to the router there.
+    pub behind_arrival_port: u32,
 }
 
 impl Counters {
@@ -125,6 +128,7 @@ impl Counters {
         not_next_hop: 0,
         originated: 0,
         not_routed: 0,
+        behind_arrival_port: 0,
     };
 }
 

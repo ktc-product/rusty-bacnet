@@ -134,6 +134,10 @@ pub enum Discard {
     /// ([`PortConfig::forwarding`](super::PortConfig::forwarding)), with any
     /// network message there.
     NotRouted,
+    /// A link broadcast for a network the router reaches through another
+    /// router on the port it arrived on. That router heard it too, so it is
+    /// left to it (135.1 test 10.2.4.8).
+    BehindArrivalPort,
 }
 
 /// Whether the router takes a network message of `kind` on a port that
@@ -380,6 +384,17 @@ impl<
         // 6-12). A DLEN 0 broadcast names no one node, so it is never that.
         if !destination.mac.is_empty() && self.is_own(destination) {
             return Received::Local(local(at, npdu, false, false));
+        }
+        // Every router on the arrival link heard a link broadcast; the one
+        // its route goes through handles it, rejects included.
+        if at.link_group
+            && self
+                .table
+                .lookup(destination.network)
+                .is_some_and(|route| !route.is_direct() && route.port() == at.port)
+        {
+            bump(&mut self.counters.behind_arrival_port);
+            return Received::Discarded(Discard::BehindArrivalPort);
         }
         let Some(route) = self.find_route(at, npdu, destination.network, options, host) else {
             return Received::Handled;
