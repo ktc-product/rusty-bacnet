@@ -64,6 +64,40 @@ fn unknown_types_draw_reason_3() {
     );
 }
 
+/// Clause 6.5.2.2: a global broadcast of a type the router doesn't know is
+/// still relayed to every other port, with the source added, and draws no
+/// reject.
+#[test]
+fn unknown_types_in_a_global_broadcast_are_relayed() {
+    let mut router = router();
+    let mut host = Recorder::default();
+    let mut unknown = Npdu::message(NetworkMessageType::from_raw(0x14), &[1]);
+    unknown.destination = Some(addr(0xFFFF, &[]));
+    let mut proprietary = Npdu::message(NetworkMessageType::from_raw(0x80), &[1]);
+    proprietary.vendor_id = Some(260);
+    proprietary.destination = Some(addr(0xFFFF, &[]));
+    for (seconds, npdu) in [(1, unknown), (10, proprietary)] {
+        let (outcome, sent) = deliver_broadcast(
+            &mut router,
+            &mut host,
+            0,
+            NODE_A,
+            &bytes(&npdu),
+            at(seconds),
+        );
+        assert_eq!(outcome, Outcome::Handled);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].port, 1);
+        assert!(sent[0].is_broadcast());
+        assert_eq!(sent[0].kind, Kind::Global);
+        let relayed = sent[0].parsed();
+        assert_eq!(relayed.message_type, npdu.message_type);
+        assert_eq!(relayed.source, Some(addr(1, NODE_A)));
+        assert_eq!(relayed.vendor_id, npdu.vendor_id);
+        assert_eq!(relayed.payload, npdu.payload);
+    }
+}
+
 /// Clauses 6.6.3.2 and 6.6.3.3: every network an I-Am-Router lists is
 /// learned through the arrival port and its sender, and the message goes
 /// on to every other port as it came. A malformed or refused one does

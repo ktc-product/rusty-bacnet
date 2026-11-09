@@ -335,7 +335,7 @@ impl<
     /// Why a global broadcast goes no further: the router's own come back
     /// round a loop, or with [`Options::duplicates`] a repeat from the same
     /// origin within the time to live. None when it is new.
-    fn repeated_global(
+    pub(super) fn repeated_global(
         &mut self,
         at: &Arrival<'_>,
         npdu: &Npdu<'_>,
