@@ -95,10 +95,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use bacnet_npdu::Mac;
+use bacnet_router_core::Instant;
+pub use bacnet_router_core::PortId;
 pub use bacnet_router_core::router::{
     Congestion, Duplicates, OriginateError, Path, Request, SourceSelection,
 };
-use bacnet_router_core::{Instant, PortId};
 use bacnet_transport::port::{DataAttribute, TransportPort};
 use bacnet_types::MacAddr;
 use bacnet_types::error::Error;

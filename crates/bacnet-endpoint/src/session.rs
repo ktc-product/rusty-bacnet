@@ -446,6 +446,19 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
     /// assert!(EndpointSession::new(transport, SessionRole::Both, bad).is_err());
     /// ```
     pub fn new(transport: T, role: SessionRole, config: SessionConfig) -> Result<Self, Error> {
+        let local_receive_capacity = transport.local_receive_apdu_capacity();
+        let ingress = EndpointIngress::new(transport, config.queue_capacity);
+        Self::with_ingress(ingress, local_receive_capacity, role, config)
+    }
+
+    /// [`Self::new`] over an ingress already built, with the APDU length
+    /// its links receive, which a composed identity resolves against.
+    pub(crate) fn with_ingress(
+        ingress: EndpointIngress<T>,
+        local_receive_capacity: u16,
+        role: SessionRole,
+        config: SessionConfig,
+    ) -> Result<Self, Error> {
         config.validate()?;
         let coordinator = Arc::new(OutboundTransactionCoordinator::new());
         let token = SessionToken::new(Arc::clone(&coordinator));
@@ -456,11 +469,9 @@ impl<T: TransportPort + 'static> EndpointSession<T> {
             min_request_interval_ms: config.min_request_interval_ms,
             ..ClientConfig::default()
         };
-        let local_receive_capacity = transport.local_receive_apdu_capacity();
         // Answers to the session's own leases come before answers no lease
         // holds when the answer queue runs short (#2635).
-        let ingress = EndpointIngress::new(transport, config.queue_capacity)
-            .with_coordinator(Arc::clone(&coordinator));
+        let ingress = ingress.with_coordinator(Arc::clone(&coordinator));
         Ok(Self {
             local_receive_capacity,
             shared: Arc::new(SessionShared {

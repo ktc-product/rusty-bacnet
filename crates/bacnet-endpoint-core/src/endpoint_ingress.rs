@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bacnet_encoding::apdu::{Apdu, decode_apdu};
 use bacnet_network::layer::{IssuedApdu, NetworkLayer, ReceivedApdu, RoutedTarget};
+use bacnet_network::response_route::ResponseRoute;
+use bacnet_network::router::{RouterOptions, RouterPort};
 use bacnet_npdu::NetworkPriority;
 use bacnet_transport::port::{DataAttribute, TransportPort};
 use bacnet_types::MacAddr;
@@ -38,6 +40,13 @@ use crate::coordinator::OutboundTransactionCoordinator;
 pub(crate) use routing::reserve;
 use routing::{ControlTee, IngressDrops, IngressQueues, next_apdu, route_received};
 pub use routing::{DROP_LOG_INTERVAL, IngressDropCounters};
+
+#[path = "endpoint_router.rs"]
+mod router;
+
+#[path = "endpoint_running.rs"]
+mod running;
+use running::{Incoming, Running, Started};
 
 /// Destination selected for one decoded APDU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,11 +147,23 @@ enum Lifecycle {
 /// stopped.
 type SessionEnd = Result<ClassifierExit, Error>;
 
-/// Owns one network layer and classifies each received APDU exactly once.
+/// What an [`EndpointIngress`] sends and receives through, before it starts.
+enum NetworkService<T: TransportPort> {
+    /// One link's network layer.
+    Link(NetworkLayer<T>),
+    /// A router whose own application the endpoint is.
+    Router(router::RouterSetup<T>),
+}
+
+/// Owns one network layer, or a router, and classifies each received APDU
+/// exactly once.
 pub struct EndpointIngress<T: TransportPort> {
-    network: Option<NetworkLayer<T>>,
-    /// The started layer, which the session task owns and a client seat
-    /// shares (#2617).
+    network: Option<NetworkService<T>>,
+    /// Whether the endpoint is a router's application.
+    routes: bool,
+    /// The started layer, which the session task owns and a full client or
+    /// full server shares (#2617). Unset on a router session, which has no
+    /// single network layer.
     started: std::sync::Weak<NetworkLayer<T>>,
     seats: Option<Arc<SeatSlot>>,
     /// What a full queue dropped, readable in any state.
@@ -159,8 +180,43 @@ pub struct EndpointIngress<T: TransportPort> {
 impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// Creates ingress with the same capacity for each bounded output queue.
     pub fn new(transport: T, queue_capacity: usize) -> Self {
+        Self::with_service(
+            NetworkService::Link(NetworkLayer::new(transport)),
+            queue_capacity,
+        )
+    }
+
+    /// Creates ingress for an endpoint that is the application of a router
+    /// on `ports`, started with `options`. The first port is the endpoint's
+    /// own link: its network is the endpoint's local network, and a direct
+    /// send, or a routed one through a named router, leaves by it. The
+    /// router answers network-number queries on every port, so
+    /// [`IngressReceivers::network_controls`] is `None`. An APDU from a
+    /// station on another port arrives with that port's network and the
+    /// station's MAC as its [`source_network`](ReceivedApdu::source_network),
+    /// so roles key it as a routed peer, one per port.
+    ///
+    /// Fails with no ports; [`Self::start`] fails as
+    /// [`BACnetRouter::start`](bacnet_network::router::BACnetRouter::start)
+    /// does.
+    pub fn with_router(
+        ports: Vec<RouterPort<T>>,
+        options: RouterOptions,
+        queue_capacity: usize,
+    ) -> Result<Self, Error> {
+        if ports.is_empty() {
+            return Err(Error::Encoding("a router endpoint needs a port".into()));
+        }
+        Ok(Self::with_service(
+            NetworkService::Router(router::RouterSetup { ports, options }),
+            queue_capacity,
+        ))
+    }
+
+    fn with_service(network: NetworkService<T>, queue_capacity: usize) -> Self {
         Self {
-            network: Some(NetworkLayer::new(transport)),
+            routes: matches!(network, NetworkService::Router(_)),
+            network: Some(network),
             started: std::sync::Weak::new(),
             seats: None,
             drops: Arc::default(),
@@ -183,10 +239,18 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         self
     }
 
+    /// The endpoint's own link's transport, before start.
+    fn home_transport(&self) -> Option<&T> {
+        match self.network.as_ref()? {
+            NetworkService::Link(network) => Some(network.transport()),
+            NetworkService::Router(setup) => Some(setup.home()),
+        }
+    }
+
     /// Pre-start link capability; never retains or exposes a transport reference.
     #[doc(hidden)]
     pub fn bip_broadcast_endpoint(&self) -> Option<std::net::SocketAddrV4> {
-        self.network.as_ref()?.transport().bip_broadcast_endpoint()
+        self.home_transport()?.bip_broadcast_endpoint()
     }
 
     /// Pre-start unicast facts of any link (#2357): the transport's own MAC
@@ -198,7 +262,7 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     pub fn link_unicast_facts(
         &self,
     ) -> Option<(MacAddr, bacnet_transport::port::GroupDestinations)> {
-        let transport = self.network.as_ref()?.transport();
+        let transport = self.home_transport()?;
         let local = if transport.bip6_port().is_some() {
             MacAddr::new()
         } else {
@@ -210,13 +274,13 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// Pre-bind B/IP registration capability, with the configured mode.
     #[doc(hidden)]
     pub fn bip_port(&self) -> Option<bacnet_transport::port::BipPort> {
-        self.network.as_ref()?.transport().bip_port()
+        self.home_transport()?.bip_port()
     }
 
     /// Pre-bind B/IPv6 registration capability, with the configured mode.
     #[doc(hidden)]
     pub fn bip6_port(&self) -> Option<bacnet_transport::port::Bip6Port> {
-        self.network.as_ref()?.transport().bip6_port()
+        self.home_transport()?.bip6_port()
     }
     /// Attach selected-object protection before starting the transport.
     #[doc(hidden)]
@@ -224,10 +288,16 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         if self.lifecycle != Lifecycle::Ready {
             return Err(Error::Encoding("ingress already started".into()));
         }
-        self.network
+        match self
+            .network
             .as_mut()
             .ok_or_else(|| Error::Encoding("missing network".into()))?
-            .retain_network_port_lease_internal(lease)
+        {
+            NetworkService::Link(network) => network.retain_network_port_lease_internal(lease),
+            NetworkService::Router(setup) => {
+                setup.home_mut().retain_network_port_lease_internal(lease)
+            }
+        }
     }
 
     /// Starts the transport, network layer, and classifier task once.
@@ -243,36 +313,95 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
             ));
         }
 
-        let network = self
-            .network
-            .as_mut()
-            .ok_or_else(|| Error::Encoding("endpoint ingress network owner is missing".into()))?;
+        let missing = || Error::Encoding("endpoint ingress network owner is missing".into());
         self.lifecycle = Lifecycle::Starting;
-        // Every link's controls are taken, for a client seat (#2617). The
-        // endpoint's own Number owner gets them only on a link that takes
-        // the local Number controls; on any other they go no further
-        // without a seat.
-        let layer_controls = network.enable_network_control_receiver()?;
-        let apdu_rx = network.start().await?;
-        let (numbers, controls) = if network
-            .transport()
-            .supports_local_nonrouter_number_controls()
-        {
-            let (tx, rx) = mpsc::channel(NUMBER_CONTROL_QUEUE);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
+        let Started {
+            running,
+            apdu_rx,
+            layer_controls,
+            numbers,
+            controls,
+            bip_port,
+            bip6_port,
+            bip_local_address,
+            bip_broadcast_endpoint,
+            local_mac,
+            local_network,
+            group_destinations,
+        } = match self.network.as_mut().ok_or_else(missing)? {
+            NetworkService::Link(network) => {
+                // Every link's controls are taken, for a client seat (#2617).
+                // The endpoint's own Number owner gets them only on a link
+                // that takes the local Number controls; on any other they go
+                // no further without a seat.
+                let layer_controls = network.enable_network_control_receiver()?;
+                let apdu_rx = network.start().await?;
+                let (numbers, controls) = if network
+                    .transport()
+                    .supports_local_nonrouter_number_controls()
+                {
+                    let (tx, rx) = mpsc::channel(NUMBER_CONTROL_QUEUE);
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
+                let capacity = network.transport().local_receive_apdu_capacity();
+                let bip_port = network.transport().bip_port().map(|port| (port, capacity));
+                let bip6_port = network.transport().bip6_port().map(|port| (port, capacity));
+                let bip_broadcast_endpoint = network.transport().bip_broadcast_endpoint();
+                let local_mac = MacAddr::from_slice(network.local_mac());
+                let bip_local_address = bip_broadcast_endpoint.and_then(|_| {
+                    bacnet_transport::bvll::decode_bip_mac(network.local_mac())
+                        .ok()
+                        .map(|(ip, port)| std::net::SocketAddrV4::new(ip.into(), port))
+                });
+                // The layer moves into the session task below; its number
+                // slot stays shared with the egress, where the endpoint's
+                // senders read it.
+                let local_network = network.local_network_number().clone();
+                let group_destinations = network.transport().group_destinations();
+                let Some(NetworkService::Link(network)) = self.network.take() else {
+                    return Err(missing());
+                };
+                Started {
+                    running: Running::Link(Arc::new(network)),
+                    apdu_rx: Incoming::Link(apdu_rx),
+                    layer_controls: Some(layer_controls),
+                    numbers,
+                    controls,
+                    bip_port,
+                    bip6_port,
+                    bip_local_address,
+                    bip_broadcast_endpoint,
+                    local_mac,
+                    local_network,
+                    group_destinations,
+                }
+            }
+            NetworkService::Router(_) => {
+                // The ports move into the router: a failed start leaves
+                // nothing to stop. The router answers network-number queries
+                // itself, so no controls reach the endpoint.
+                let Some(NetworkService::Router(setup)) = self.network.take() else {
+                    return Err(missing());
+                };
+                let started = setup.start().await?;
+                Started {
+                    running: Running::Router(Box::new(started.service)),
+                    apdu_rx: Incoming::Router(started.apdus),
+                    layer_controls: None,
+                    numbers: None,
+                    controls: None,
+                    bip_port: started.bip_port,
+                    bip6_port: started.bip6_port,
+                    bip_local_address: started.bip_local_address,
+                    bip_broadcast_endpoint: started.bip_broadcast_endpoint,
+                    local_mac: started.local_mac,
+                    local_network: started.local_network,
+                    group_destinations: started.group_destinations,
+                }
+            }
         };
-        let capacity = network.transport().local_receive_apdu_capacity();
-        let bip_port = network.transport().bip_port().map(|port| (port, capacity));
-        let bip6_port = network.transport().bip6_port().map(|port| (port, capacity));
-        let bip_broadcast_endpoint = network.transport().bip_broadcast_endpoint();
-        let local_mac = MacAddr::from_slice(network.local_mac());
-        let bip_local_address = bip_broadcast_endpoint.and_then(|_| {
-            bacnet_transport::bvll::decode_bip_mac(network.local_mac())
-                .ok()
-                .map(|(ip, port)| std::net::SocketAddrV4::new(ip.into(), port))
-        });
         let (inbound_tx, inbound_requests) = mpsc::channel(self.queue_capacity);
         let (terminal_tx, terminal_or_segment) = mpsc::channel(self.queue_capacity);
         let (policy_tx, policy_outcomes) = mpsc::channel(self.queue_capacity);
@@ -293,24 +422,20 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         let (egress_tx, egress_rx) = mpsc::channel(self.queue_capacity);
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let egress_open = Arc::new(AtomicBool::new(true));
-        // The layer moves into the session task below; its number slot stays
-        // shared with the egress, where the endpoint's senders read it.
         let egress = EndpointEgress {
             commands: egress_tx,
             open: Arc::clone(&egress_open),
-            local_network: network.local_network_number().clone(),
-            group_destinations: network.transport().group_destinations(),
+            local_network,
+            group_destinations,
         };
-        let network =
-            Arc::new(self.network.take().ok_or_else(|| {
-                Error::Encoding("endpoint ingress network owner is missing".into())
-            })?);
-        self.started = Arc::downgrade(&network);
+        if let Running::Link(network) = &running {
+            self.started = Arc::downgrade(network);
+        }
         let seat_number = seats.number().clone();
         self.seats = Some(seats);
 
         self.session_task = Some(tokio::spawn(session_task(
-            network,
+            running,
             (apdu_rx, controls_tee),
             queues,
             egress_rx,
@@ -339,7 +464,8 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// A seat for a full client on the started link (#2617): the layer and
     /// `coordinator` shared, and queues of `capacity` APDUs for what is the
     /// client's to take (see [`crate::seat`]). One client at a time. Fails
-    /// before start and once the endpoint is stopping.
+    /// before start, once the endpoint is stopping, and on a router session,
+    /// which has no single layer to share.
     #[doc(hidden)]
     pub fn client_seat(
         &self,
@@ -347,6 +473,7 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         roles: crate::seat::SeatRoles,
         capacity: usize,
     ) -> Result<crate::seat::ClientSeat<T>, Error> {
+        self.refuse_seat_on_router()?;
         let not_running = || Error::Encoding("endpoint ingress is not running".into());
         if self.lifecycle != Lifecycle::Running {
             return Err(not_running());
@@ -363,13 +490,15 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// While it is attached it takes the place of the endpoint's own request
     /// queue (see [`crate::seat`]), so its queue is as deep as that one, the
     /// capacity [`Self::new`] was given. One server at a time; `coordinator`
-    /// must be the client seat's when one is attached. Fails before start
-    /// and once the endpoint is stopping.
+    /// must be the client seat's when one is attached. Fails before start,
+    /// once the endpoint is stopping, and on a router session, which has no
+    /// single layer to share.
     #[doc(hidden)]
     pub fn server_seat(
         &self,
         coordinator: Arc<crate::coordinator::OutboundTransactionCoordinator>,
     ) -> Result<crate::seat::ServerSeat<T>, Error> {
+        self.refuse_seat_on_router()?;
         let not_running = || Error::Encoding("endpoint ingress is not running".into());
         if self.lifecycle != Lifecycle::Running {
             return Err(not_running());
@@ -380,6 +509,20 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
             coordinator,
             self.queue_capacity,
         )
+    }
+
+    /// A full client or full server runs on one link's network layer, which
+    /// a router session doesn't have. The session's own client and server
+    /// roles serve it.
+    fn refuse_seat_on_router(&self) -> Result<(), Error> {
+        if self.routes {
+            return Err(Error::Encoding(
+                "a full client or full server needs one link's network layer; \
+                 a router endpoint uses its own client and server roles"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// What ingress dropped because a queue of its own was full, by class
@@ -426,11 +569,12 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         ) {
             return Err(Error::Encoding("endpoint ingress is not running".into()));
         }
-        if self.lifecycle == Lifecycle::Starting
-            && let Some(network) = self.network.take()
-        {
+        if self.lifecycle == Lifecycle::Starting {
+            let network = self.network.take();
             self.session_task = Some(tokio::spawn(async move {
-                network.stop().await?;
+                if let Some(NetworkService::Link(network)) = network {
+                    network.stop().await?;
+                }
                 Ok(ClassifierExit::Cancelled)
             }));
         }
@@ -483,8 +627,8 @@ impl<T: TransportPort> Drop for EndpointIngress<T> {
 }
 
 async fn session_task<T: TransportPort + 'static>(
-    network: Arc<NetworkLayer<T>>,
-    (mut apdu_rx, mut controls): (bacnet_network::layer::ApduReceiver, ControlTee),
+    mut network: Running<T>,
+    (mut apdu_rx, mut controls): (Incoming, ControlTee),
     queues: IngressQueues,
     mut egress_rx: mpsc::Receiver<NetworkServiceCommand>,
     mut cancel_rx: oneshot::Receiver<()>,
@@ -513,8 +657,7 @@ async fn session_task<T: TransportPort + 'static>(
             SessionEvent::Cancelled => break ClassifierExit::Cancelled,
             SessionEvent::Received(Some(received)) => {
                 prefer_ingress = !prefer_ingress;
-                let number = network.local_network_number().get();
-                if let Some(exit) = route_received(received, &queues, network.transport(), number) {
+                if let Some(exit) = route_received(received, &queues, &network) {
                     break exit;
                 }
             }
@@ -584,9 +727,9 @@ enum PendingEvent {
 }
 
 async fn drive_network_service<T: TransportPort + 'static>(
-    network: &NetworkLayer<T>,
+    network: &Running<T>,
     command: NetworkServiceCommand,
-    (apdu_rx, controls): (&mut bacnet_network::layer::ApduReceiver, &mut ControlTee),
+    (apdu_rx, controls): (&mut Incoming, &mut ControlTee),
     queues: &IngressQueues,
     cancel_rx: &mut oneshot::Receiver<()>,
     prefer_ingress: &mut bool,
@@ -621,61 +764,14 @@ async fn drive_network_service<T: TransportPort + 'static>(
     };
     tokio::pin!(expiry);
     let outcome = {
-        let send = async {
-            match &payload {
-                NetworkServicePayload::Apdu(apdu) => {
-                    if let Some(route) = &response_route {
-                        let (next_hop, destination) = match &destination {
-                            EndpointApduDestination::Direct { destination_mac } => {
-                                (destination_mac, None)
-                            }
-                            EndpointApduDestination::Routed {
-                                destination_network,
-                                destination_mac,
-                                router_mac,
-                            } => (
-                                router_mac,
-                                Some(bacnet_encoding::npdu::NpduAddress {
-                                    network: *destination_network,
-                                    mac_address: destination_mac.clone(),
-                                }),
-                            ),
-                            _ => {
-                                return Err(Error::Encoding(
-                                    "response requires a unicast destination".into(),
-                                ));
-                            }
-                        };
-                        network
-                            .send_response_apdu_on_issuance(
-                                IssuedApdu {
-                                    apdu,
-                                    next_hop,
-                                    destination: destination.as_ref(),
-                                    expecting_reply,
-                                    priority,
-                                },
-                                route,
-                                || {},
-                            )
-                            .await
-                    } else {
-                        send_network_service_apdu(
-                            network,
-                            apdu,
-                            &destination,
-                            expecting_reply,
-                            priority,
-                            &data_attributes,
-                        )
-                        .await
-                    }
-                }
-                NetworkServicePayload::LocalControl(npdu) => {
-                    network.transport().send_broadcast(npdu).await
-                }
-            }
-        };
+        let send = network.send(
+            &payload,
+            response_route.as_ref(),
+            &destination,
+            expecting_reply,
+            priority,
+            &data_attributes,
+        );
         tokio::pin!(send);
         loop {
             let event = if *prefer_ingress {
@@ -712,10 +808,7 @@ async fn drive_network_service<T: TransportPort + 'static>(
                 PendingEvent::Cancelled => break EgressDrive::Cancelled,
                 PendingEvent::Received(Some(received)) => {
                     *prefer_ingress = !*prefer_ingress;
-                    let number = network.local_network_number().get();
-                    if let Some(exit) =
-                        route_received(received, queues, network.transport(), number)
-                    {
+                    if let Some(exit) = route_received(received, queues, network) {
                         break EgressDrive::Exit(exit);
                     }
                 }
@@ -782,3 +875,7 @@ mod network_service_tests;
 #[cfg(test)]
 #[path = "endpoint_egress_deadline_tests.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+#[path = "endpoint_router_tests.rs"]
+mod router_tests;

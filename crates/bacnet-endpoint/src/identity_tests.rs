@@ -80,6 +80,6 @@ fn without_apdu_timers_nothing_changes() {
     let session = session_with(identity);
     assert_eq!(
         (session.config.apdu_timeout_ms, session.config.apdu_retries),
-        (1000, 0)
+        (6000, 3)
     );
 }

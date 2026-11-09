@@ -449,11 +449,10 @@ fn seat_copy(received: &ReceivedApdu) -> ReceivedApdu {
     copy
 }
 
-pub(super) fn route_received(
+pub(super) fn route_received<T: TransportPort + 'static>(
     received: ReceivedApdu,
     queues: &IngressQueues,
-    transport: &impl TransportPort,
-    local_network: Option<u16>,
+    network: &Running<T>,
 ) -> Option<ClassifierExit> {
     let IngressQueues {
         inbound_tx,
@@ -463,7 +462,9 @@ pub(super) fn route_received(
         drops,
         coordinator,
     } = queues;
-    let route = match classify(&received, transport) {
+    let local_network = network.local_network();
+    let received = network.delivered(received);
+    let route = match classify(&received, |received| network.is_group_source(received)) {
         Ok(route) => route,
         Err(reason) => return send_policy(policy_tx, drops, PolicyOutcome { reason, received }),
     };
@@ -512,7 +513,7 @@ pub(super) fn route_received(
 
 fn classify(
     received: &ReceivedApdu,
-    transport: &impl TransportPort,
+    is_group_source: impl FnOnce(&ReceivedApdu) -> bool,
 ) -> Result<IngressRoute, PolicyReason> {
     let Some(first) = received.apdu.first() else {
         return Err(PolicyReason::MalformedApdu);
@@ -523,7 +524,7 @@ fn classify(
     }
 
     match decode_apdu(received.apdu.clone()) {
-        Ok(Apdu::ConfirmedRequest(_)) if transport.is_group_destination(&received.source_mac) => {
+        Ok(Apdu::ConfirmedRequest(_)) if is_group_source(received) => {
             Err(PolicyReason::GroupSource)
         }
         Ok(Apdu::ConfirmedRequest(_) | Apdu::UnconfirmedRequest(_)) => {
@@ -564,16 +565,20 @@ fn send_policy(
 /// out: the endpoint's Number owner when the link takes the Number controls,
 /// and a copy for the client seat when one is attached; the server seat
 /// takes none. Without either, a
-/// control is discarded, as the layer discards one nobody asked for.
+/// control is discarded, as the layer discards one nobody asked for. A
+/// router session has no `layer`: the router answers controls itself.
 pub(super) struct ControlTee {
-    pub(super) layer: mpsc::Receiver<bacnet_network::layer::ReceivedNetworkControl>,
+    pub(super) layer: Option<mpsc::Receiver<bacnet_network::layer::ReceivedNetworkControl>>,
     pub(super) numbers: Option<mpsc::Sender<bacnet_network::layer::ReceivedNetworkControl>>,
     pub(super) seats: Arc<SeatSlot>,
 }
 
 impl ControlTee {
     fn drain(&mut self) {
-        while let Ok(control) = self.layer.try_recv() {
+        let Some(layer) = self.layer.as_mut() else {
+            return;
+        };
+        while let Ok(control) = layer.try_recv() {
             self.seats.offer_control(&control);
             if let Some(numbers) = &self.numbers
                 && let Err(mpsc::error::TrySendError::Closed(_)) = numbers.try_send(control)
@@ -585,10 +590,11 @@ impl ControlTee {
 }
 
 /// The next APDU, as [`ApduReceiver::recv`](bacnet_network::layer::ApduReceiver::recv)
-/// gives it, sharing out the controls each poll of the layer queued. Cancel
-/// safe: a control taken from the layer is handed on in the same poll.
+/// or the router's queue gives it, sharing out the controls each poll of the
+/// layer queued. Cancel safe: a control taken from the layer is handed on in
+/// the same poll.
 pub(super) async fn next_apdu(
-    apdu_rx: &mut bacnet_network::layer::ApduReceiver,
+    apdu_rx: &mut Incoming,
     controls: &mut ControlTee,
 ) -> Option<ReceivedApdu> {
     std::future::poll_fn(|cx| {
