@@ -120,6 +120,19 @@ impl<
                 host.observe(Event::SecurityMessage { message_type: kind });
                 Received::Handled
             }
+            // A global broadcast is for every network, so it is relayed whatever its type,
+            // never refused for a type this router doesn't know (135.1 test 10.2.2.7.3).
+            _ if npdu
+                .destination
+                .is_some_and(|destination| destination.network == GLOBAL_NETWORK) =>
+            {
+                if let Some(discard) = self.repeated_global(at, npdu, options) {
+                    return Received::Discarded(discard);
+                }
+                host.observe(Event::UnknownMessage { message_type: kind });
+                self.forward_global(at, npdu, host);
+                Received::Handled
+            }
             _ => {
                 // A reserved type, or a proprietary one without a DNET to
                 // route it by (Clause 6.6.3.5).
