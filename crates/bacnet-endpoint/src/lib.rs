@@ -7,6 +7,7 @@ mod held_database;
 pub mod identity;
 pub mod mstp;
 pub mod roles;
+pub mod router;
 pub mod sc;
 pub mod session;
 mod source_audit;

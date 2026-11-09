@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bacnet_encoding::apdu::{Apdu, decode_apdu};
 use bacnet_network::layer::{IssuedApdu, NetworkLayer, ReceivedApdu, RoutedTarget};
+use bacnet_network::response_route::ResponseRoute;
+use bacnet_network::router::{RouterOptions, RouterPort};
 use bacnet_npdu::NetworkPriority;
 use bacnet_transport::port::{DataAttribute, TransportPort};
 use bacnet_types::MacAddr;
@@ -25,6 +27,9 @@ pub use destination::EndpointApduDestination;
 mod egress;
 pub use egress::{EndpointEgress, EndpointEgressAdmissionError, EndpointSend, EndpointSendOutcome};
 use egress::{NetworkServiceCommand, NetworkServicePayload};
+
+#[path = "endpoint_router.rs"]
+mod router;
 
 /// Destination selected for one decoded APDU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,9 +123,18 @@ enum Lifecycle {
     Stopped,
 }
 
-/// Owns one network layer and classifies each received APDU exactly once.
+/// What an [`EndpointIngress`] sends and receives through, before it starts.
+enum NetworkService<T: TransportPort> {
+    /// One link's network layer.
+    Link(NetworkLayer<T>),
+    /// A router whose own application the endpoint is.
+    Router(router::RouterSetup<T>),
+}
+
+/// Owns one network layer, or a router, and classifies each received APDU
+/// exactly once.
 pub struct EndpointIngress<T: TransportPort> {
-    network: Option<NetworkLayer<T>>,
+    network: Option<NetworkService<T>>,
     queue_capacity: usize,
     lifecycle: Lifecycle,
     cancel_tx: Option<oneshot::Sender<()>>,
@@ -131,8 +145,42 @@ pub struct EndpointIngress<T: TransportPort> {
 impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// Creates ingress with the same capacity for each bounded output queue.
     pub fn new(transport: T, queue_capacity: usize) -> Self {
+        Self::with_service(
+            NetworkService::Link(NetworkLayer::new(transport)),
+            queue_capacity,
+        )
+    }
+
+    /// Creates ingress for an endpoint that is the application of a router
+    /// on `ports`, started with `options`. The first port is the endpoint's
+    /// own link: its network is the endpoint's local network, and a direct
+    /// send, or a routed one through a named router, leaves by it. The
+    /// router answers network-number queries on every port, so
+    /// [`IngressReceivers::network_controls`] is `None`. An APDU from a
+    /// station on another port arrives with that port's network and the
+    /// station's MAC as its [`source_network`](ReceivedApdu::source_network),
+    /// so roles key it as a routed peer, one per port.
+    ///
+    /// Fails with no ports; [`Self::start`] fails as
+    /// [`BACnetRouter::start`](bacnet_network::router::BACnetRouter::start)
+    /// does.
+    pub fn with_router(
+        ports: Vec<RouterPort<T>>,
+        options: RouterOptions,
+        queue_capacity: usize,
+    ) -> Result<Self, Error> {
+        if ports.is_empty() {
+            return Err(Error::Encoding("a router endpoint needs a port".into()));
+        }
+        Ok(Self::with_service(
+            NetworkService::Router(router::RouterSetup { ports, options }),
+            queue_capacity,
+        ))
+    }
+
+    fn with_service(network: NetworkService<T>, queue_capacity: usize) -> Self {
         Self {
-            network: Some(NetworkLayer::new(transport)),
+            network: Some(network),
             queue_capacity,
             lifecycle: Lifecycle::Ready,
             cancel_tx: None,
@@ -141,10 +189,18 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         }
     }
 
+    /// The endpoint's own link's transport, before start.
+    fn home_transport(&self) -> Option<&T> {
+        match self.network.as_ref()? {
+            NetworkService::Link(network) => Some(network.transport()),
+            NetworkService::Router(setup) => Some(setup.home()),
+        }
+    }
+
     /// Pre-start link capability; never retains or exposes a transport reference.
     #[doc(hidden)]
     pub fn bip_broadcast_endpoint(&self) -> Option<std::net::SocketAddrV4> {
-        self.network.as_ref()?.transport().bip_broadcast_endpoint()
+        self.home_transport()?.bip_broadcast_endpoint()
     }
 
     /// Pre-start unicast facts of any link (#2357): the transport's own MAC
@@ -156,7 +212,7 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     pub fn link_unicast_facts(
         &self,
     ) -> Option<(MacAddr, bacnet_transport::port::GroupDestinations)> {
-        let transport = self.network.as_ref()?.transport();
+        let transport = self.home_transport()?;
         let local = if transport.bip6_port().is_some() {
             MacAddr::new()
         } else {
@@ -168,13 +224,13 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
     /// Pre-bind B/IP registration capability, with the configured mode.
     #[doc(hidden)]
     pub fn bip_port(&self) -> Option<bacnet_transport::port::BipPort> {
-        self.network.as_ref()?.transport().bip_port()
+        self.home_transport()?.bip_port()
     }
 
     /// Pre-bind B/IPv6 registration capability, with the configured mode.
     #[doc(hidden)]
     pub fn bip6_port(&self) -> Option<bacnet_transport::port::Bip6Port> {
-        self.network.as_ref()?.transport().bip6_port()
+        self.home_transport()?.bip6_port()
     }
     /// Attach selected-object protection before starting the transport.
     #[doc(hidden)]
@@ -182,10 +238,16 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         if self.lifecycle != Lifecycle::Ready {
             return Err(Error::Encoding("ingress already started".into()));
         }
-        self.network
+        match self
+            .network
             .as_mut()
             .ok_or_else(|| Error::Encoding("missing network".into()))?
-            .retain_network_port_lease_internal(lease)
+        {
+            NetworkService::Link(network) => network.retain_network_port_lease_internal(lease),
+            NetworkService::Router(setup) => {
+                setup.home_mut().retain_network_port_lease_internal(lease)
+            }
+        }
     }
 
     /// Starts the transport, network layer, and classifier task once.
@@ -201,35 +263,87 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
             ));
         }
 
-        let network = self
-            .network
-            .as_mut()
-            .ok_or_else(|| Error::Encoding("endpoint ingress network owner is missing".into()))?;
+        let missing = || Error::Encoding("endpoint ingress network owner is missing".into());
         self.lifecycle = Lifecycle::Starting;
-        let controls = if network
-            .transport()
-            .supports_local_nonrouter_number_controls()
-        {
-            Some(network.enable_network_control_receiver()?)
-        } else {
-            None
+        let Started {
+            running,
+            apdu_rx,
+            controls,
+            bip_port,
+            bip6_port,
+            bip_local_address,
+            bip_broadcast_endpoint,
+            local_mac,
+            local_network,
+            group_destinations,
+        } = match self.network.as_mut().ok_or_else(missing)? {
+            NetworkService::Link(network) => {
+                let controls = if network
+                    .transport()
+                    .supports_local_nonrouter_number_controls()
+                {
+                    Some(network.enable_network_control_receiver()?)
+                } else {
+                    None
+                };
+                let apdu_rx = network.start().await?;
+                let controls = network
+                    .transport()
+                    .supports_local_nonrouter_number_controls()
+                    .then_some(controls)
+                    .flatten();
+                let capacity = network.transport().local_receive_apdu_capacity();
+                let bip_port = network.transport().bip_port().map(|port| (port, capacity));
+                let bip6_port = network.transport().bip6_port().map(|port| (port, capacity));
+                let bip_broadcast_endpoint = network.transport().bip_broadcast_endpoint();
+                let local_mac = MacAddr::from_slice(network.local_mac());
+                let bip_local_address = bip_broadcast_endpoint.and_then(|_| {
+                    bacnet_transport::bvll::decode_bip_mac(network.local_mac())
+                        .ok()
+                        .map(|(ip, port)| std::net::SocketAddrV4::new(ip.into(), port))
+                });
+                // The layer moves into the session task below; its number
+                // slot stays shared with the egress, where the endpoint's
+                // senders read it.
+                let local_network = network.local_network_number().clone();
+                let group_destinations = network.transport().group_destinations();
+                let Some(NetworkService::Link(network)) = self.network.take() else {
+                    return Err(missing());
+                };
+                Started {
+                    running: Running::Link(network),
+                    apdu_rx: Incoming::Link(apdu_rx),
+                    controls,
+                    bip_port,
+                    bip6_port,
+                    bip_local_address,
+                    bip_broadcast_endpoint,
+                    local_mac,
+                    local_network,
+                    group_destinations,
+                }
+            }
+            NetworkService::Router(_) => {
+                // The ports move into the router: a failed start leaves
+                // nothing to stop.
+                let Some(NetworkService::Router(setup)) = self.network.take() else {
+                    return Err(missing());
+                };
+                let started = setup.start().await?;
+                Started {
+                    running: Running::Router(started.service),
+                    apdu_rx: Incoming::Router(started.apdus),
+                    controls: None,
+                    bip_port: started.bip_port,
+                    bip6_port: started.bip6_port,
+                    bip_local_address: started.bip_local_address,
+                    bip_broadcast_endpoint: started.bip_broadcast_endpoint,
+                    local_mac: started.local_mac,
+                    local_network: started.local_network,
+                    group_destinations: started.group_destinations,
+                }
+            }
         };
-        let apdu_rx = network.start().await?;
-        let controls = network
-            .transport()
-            .supports_local_nonrouter_number_controls()
-            .then_some(controls)
-            .flatten();
-        let capacity = network.transport().local_receive_apdu_capacity();
-        let bip_port = network.transport().bip_port().map(|port| (port, capacity));
-        let bip6_port = network.transport().bip6_port().map(|port| (port, capacity));
-        let bip_broadcast_endpoint = network.transport().bip_broadcast_endpoint();
-        let local_mac = MacAddr::from_slice(network.local_mac());
-        let bip_local_address = bip_broadcast_endpoint.and_then(|_| {
-            bacnet_transport::bvll::decode_bip_mac(network.local_mac())
-                .ok()
-                .map(|(ip, port)| std::net::SocketAddrV4::new(ip.into(), port))
-        });
         let (inbound_tx, inbound_requests) = mpsc::channel(self.queue_capacity);
         let (terminal_tx, terminal_or_segment) = mpsc::channel(self.queue_capacity);
         let (policy_tx, policy_outcomes) = mpsc::channel(self.queue_capacity);
@@ -241,21 +355,15 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         let (egress_tx, egress_rx) = mpsc::channel(self.queue_capacity);
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let egress_open = Arc::new(AtomicBool::new(true));
-        // The layer moves into the session task below; its number slot stays
-        // shared with the egress, where the endpoint's senders read it.
         let egress = EndpointEgress {
             commands: egress_tx,
             open: Arc::clone(&egress_open),
-            local_network: network.local_network_number().clone(),
-            group_destinations: network.transport().group_destinations(),
+            local_network,
+            group_destinations,
         };
-        let network = self
-            .network
-            .take()
-            .ok_or_else(|| Error::Encoding("endpoint ingress network owner is missing".into()))?;
 
         self.session_task = Some(tokio::spawn(session_task(
-            network,
+            running,
             apdu_rx,
             queues,
             egress_rx,
@@ -288,11 +396,12 @@ impl<T: TransportPort + 'static> EndpointIngress<T> {
         ) {
             return Err(Error::Encoding("endpoint ingress is not running".into()));
         }
-        if self.lifecycle == Lifecycle::Starting
-            && let Some(mut network) = self.network.take()
-        {
+        if self.lifecycle == Lifecycle::Starting {
+            let network = self.network.take();
             self.session_task = Some(tokio::spawn(async move {
-                network.stop().await?;
+                if let Some(NetworkService::Link(mut network)) = network {
+                    network.stop().await?;
+                }
                 Ok(ClassifierExit::Cancelled)
             }));
         }
@@ -342,9 +451,112 @@ struct IngressQueues {
     policy_tx: mpsc::Sender<PolicyOutcome>,
 }
 
+/// What a started [`NetworkService`] hands the session task and the egress.
+struct Started<T: TransportPort> {
+    running: Running<T>,
+    apdu_rx: Incoming,
+    controls: Option<mpsc::Receiver<bacnet_network::layer::ReceivedNetworkControl>>,
+    bip_port: Option<(bacnet_transport::port::BipPort, u16)>,
+    bip6_port: Option<(bacnet_transport::port::Bip6Port, u16)>,
+    bip_local_address: Option<std::net::SocketAddrV4>,
+    bip_broadcast_endpoint: Option<std::net::SocketAddrV4>,
+    local_mac: MacAddr,
+    local_network: bacnet_network::network_number::LocalNetworkNumber,
+    group_destinations: bacnet_transport::port::GroupDestinations,
+}
+
+/// What the session task sends and receives through.
+enum Running<T: TransportPort> {
+    Link(NetworkLayer<T>),
+    Router(router::RouterService),
+}
+
+impl<T: TransportPort + 'static> Running<T> {
+    /// `received` as the endpoint's roles see it
+    /// ([`router::RouterService::delivered`] for a router).
+    fn delivered(&self, received: ReceivedApdu) -> ReceivedApdu {
+        match self {
+            Self::Link(_) => received,
+            Self::Router(router) => router.delivered(received),
+        }
+    }
+
+    /// Whether `received` came from a link-layer address that is a group
+    /// destination where it arrived.
+    fn is_group_source(&self, received: &ReceivedApdu) -> bool {
+        match self {
+            Self::Link(network) => network
+                .transport()
+                .is_group_destination(&received.source_mac),
+            Self::Router(router) => router.is_group_source(received),
+        }
+    }
+
+    async fn send(
+        &self,
+        payload: &NetworkServicePayload,
+        response_route: Option<&ResponseRoute>,
+        destination: &EndpointApduDestination,
+        expecting_reply: bool,
+        priority: NetworkPriority,
+        data_attributes: &[DataAttribute],
+    ) -> Result<(), Error> {
+        match self {
+            Self::Link(network) => {
+                send_on_link(
+                    network,
+                    payload,
+                    response_route,
+                    destination,
+                    expecting_reply,
+                    priority,
+                    data_attributes,
+                )
+                .await
+            }
+            Self::Router(router) => {
+                router
+                    .send(
+                        payload,
+                        response_route,
+                        destination,
+                        expecting_reply,
+                        priority,
+                        data_attributes,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn stop(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Link(network) => network.stop().await,
+            Self::Router(router) => router.stop().await,
+        }
+    }
+}
+
+/// Where the session task receives APDUs from.
+enum Incoming {
+    Link(bacnet_network::layer::ApduReceiver),
+    Router(mpsc::Receiver<ReceivedApdu>),
+}
+
+impl Incoming {
+    /// The next APDU, or `None` once the source is closed. Cancel safe, as
+    /// both receivers are, so it can sit in a `select!`.
+    async fn recv(&mut self) -> Option<ReceivedApdu> {
+        match self {
+            Self::Link(apdus) => apdus.recv().await,
+            Self::Router(apdus) => apdus.recv().await,
+        }
+    }
+}
+
 async fn session_task<T: TransportPort + 'static>(
-    mut network: NetworkLayer<T>,
-    mut apdu_rx: bacnet_network::layer::ApduReceiver,
+    mut network: Running<T>,
+    mut apdu_rx: Incoming,
     queues: IngressQueues,
     mut egress_rx: mpsc::Receiver<NetworkServiceCommand>,
     mut cancel_rx: oneshot::Receiver<()>,
@@ -373,7 +585,7 @@ async fn session_task<T: TransportPort + 'static>(
             SessionEvent::Cancelled => break ClassifierExit::Cancelled,
             SessionEvent::Received(Some(received)) => {
                 prefer_ingress = !prefer_ingress;
-                if let Some(exit) = route_received(received, &queues, network.transport()) {
+                if let Some(exit) = route_received(received, &queues, &network) {
                     break exit;
                 }
             }
@@ -433,9 +645,9 @@ enum PendingEvent {
 }
 
 async fn drive_network_service<T: TransportPort + 'static>(
-    network: &NetworkLayer<T>,
+    network: &Running<T>,
     command: NetworkServiceCommand,
-    apdu_rx: &mut bacnet_network::layer::ApduReceiver,
+    apdu_rx: &mut Incoming,
     queues: &IngressQueues,
     cancel_rx: &mut oneshot::Receiver<()>,
     prefer_ingress: &mut bool,
@@ -470,61 +682,14 @@ async fn drive_network_service<T: TransportPort + 'static>(
     };
     tokio::pin!(expiry);
     let outcome = {
-        let send = async {
-            match &payload {
-                NetworkServicePayload::Apdu(apdu) => {
-                    if let Some(route) = &response_route {
-                        let (next_hop, destination) = match &destination {
-                            EndpointApduDestination::Direct { destination_mac } => {
-                                (destination_mac, None)
-                            }
-                            EndpointApduDestination::Routed {
-                                destination_network,
-                                destination_mac,
-                                router_mac,
-                            } => (
-                                router_mac,
-                                Some(bacnet_encoding::npdu::NpduAddress {
-                                    network: *destination_network,
-                                    mac_address: destination_mac.clone(),
-                                }),
-                            ),
-                            _ => {
-                                return Err(Error::Encoding(
-                                    "response requires a unicast destination".into(),
-                                ));
-                            }
-                        };
-                        network
-                            .send_response_apdu_on_issuance(
-                                IssuedApdu {
-                                    apdu,
-                                    next_hop,
-                                    destination: destination.as_ref(),
-                                    expecting_reply,
-                                    priority,
-                                },
-                                route,
-                                || {},
-                            )
-                            .await
-                    } else {
-                        send_network_service_apdu(
-                            network,
-                            apdu,
-                            &destination,
-                            expecting_reply,
-                            priority,
-                            &data_attributes,
-                        )
-                        .await
-                    }
-                }
-                NetworkServicePayload::LocalControl(npdu) => {
-                    network.transport().send_broadcast(npdu).await
-                }
-            }
-        };
+        let send = network.send(
+            &payload,
+            response_route.as_ref(),
+            &destination,
+            expecting_reply,
+            priority,
+            &data_attributes,
+        );
         tokio::pin!(send);
         loop {
             let event = if *prefer_ingress {
@@ -561,7 +726,7 @@ async fn drive_network_service<T: TransportPort + 'static>(
                 PendingEvent::Cancelled => break EgressDrive::Cancelled,
                 PendingEvent::Received(Some(received)) => {
                     *prefer_ingress = !*prefer_ingress;
-                    if let Some(exit) = route_received(received, queues, network.transport()) {
+                    if let Some(exit) = route_received(received, queues, network) {
                         break EgressDrive::Exit(exit);
                     }
                 }
@@ -585,6 +750,67 @@ async fn drive_network_service<T: TransportPort + 'static>(
         attempted: true,
     });
     outcome
+}
+
+/// One send through a link's network layer.
+async fn send_on_link<T: TransportPort + 'static>(
+    network: &NetworkLayer<T>,
+    payload: &NetworkServicePayload,
+    response_route: Option<&ResponseRoute>,
+    destination: &EndpointApduDestination,
+    expecting_reply: bool,
+    priority: NetworkPriority,
+    data_attributes: &[DataAttribute],
+) -> Result<(), Error> {
+    match payload {
+        NetworkServicePayload::Apdu(apdu) => {
+            if let Some(route) = response_route {
+                let (next_hop, destination) = match destination {
+                    EndpointApduDestination::Direct { destination_mac } => (destination_mac, None),
+                    EndpointApduDestination::Routed {
+                        destination_network,
+                        destination_mac,
+                        router_mac,
+                    } => (
+                        router_mac,
+                        Some(bacnet_encoding::npdu::NpduAddress {
+                            network: *destination_network,
+                            mac_address: destination_mac.clone(),
+                        }),
+                    ),
+                    _ => {
+                        return Err(Error::Encoding(
+                            "response requires a unicast destination".into(),
+                        ));
+                    }
+                };
+                network
+                    .send_response_apdu_on_issuance(
+                        IssuedApdu {
+                            apdu,
+                            next_hop,
+                            destination: destination.as_ref(),
+                            expecting_reply,
+                            priority,
+                        },
+                        route,
+                        || {},
+                    )
+                    .await
+            } else {
+                send_network_service_apdu(
+                    network,
+                    apdu,
+                    destination,
+                    expecting_reply,
+                    priority,
+                    data_attributes,
+                )
+                .await
+            }
+        }
+        NetworkServicePayload::LocalControl(npdu) => network.transport().send_broadcast(npdu).await,
+    }
 }
 
 async fn send_network_service_apdu<T: TransportPort + 'static>(
@@ -710,17 +936,18 @@ fn validate_effective_group_apdu(
     }
 }
 
-fn route_received(
+fn route_received<T: TransportPort + 'static>(
     received: ReceivedApdu,
     queues: &IngressQueues,
-    transport: &impl TransportPort,
+    network: &Running<T>,
 ) -> Option<ClassifierExit> {
     let IngressQueues {
         inbound_tx,
         terminal_tx,
         policy_tx,
     } = queues;
-    let route = match classify(&received, transport) {
+    let received = network.delivered(received);
+    let route = match classify(&received, |received| network.is_group_source(received)) {
         Ok(route) => route,
         Err(reason) => return send_policy(policy_tx, PolicyOutcome { reason, received }),
     };
@@ -743,7 +970,7 @@ fn route_received(
 
 fn classify(
     received: &ReceivedApdu,
-    transport: &impl TransportPort,
+    is_group_source: impl FnOnce(&ReceivedApdu) -> bool,
 ) -> Result<IngressRoute, PolicyReason> {
     let Some(first) = received.apdu.first() else {
         return Err(PolicyReason::MalformedApdu);
@@ -754,7 +981,7 @@ fn classify(
     }
 
     match decode_apdu(received.apdu.clone()) {
-        Ok(Apdu::ConfirmedRequest(_)) if transport.is_group_destination(&received.source_mac) => {
+        Ok(Apdu::ConfirmedRequest(_)) if is_group_source(received) => {
             Err(PolicyReason::GroupSource)
         }
         Ok(Apdu::ConfirmedRequest(_) | Apdu::UnconfirmedRequest(_)) => {
@@ -798,3 +1025,7 @@ mod network_service_tests;
 #[cfg(test)]
 #[path = "endpoint_egress_deadline_tests.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+#[path = "endpoint_router_tests.rs"]
+mod router_tests;
