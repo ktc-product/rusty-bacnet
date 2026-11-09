@@ -11,7 +11,8 @@ use bacnet_router_core::npdu::{NetworkMessageType, RejectMessageReason};
 use bacnet_router_core::router::{Cause, Discard, Event, Kind, Options};
 use fixture::{
     CONFIRMED, NODE_A, OWN_0, OWN_1, Outcome, R7, Recorder, UNCONFIRMED, addr, apdu_to, at, bytes,
-    deliver, learn_9_via_r7, port_on, router, router_with, sent_reject, two_ports,
+    deliver, deliver_broadcast, learn_9_via_r7, port_on, router, router_with, sent_reject,
+    two_ports,
 };
 
 /// Clause 6.5.4: SNET and SADR are added from the arrival network and the
@@ -74,6 +75,27 @@ fn direct_delivery_strips_destination() {
     );
     assert_eq!((sent[0].port, sent[0].is_broadcast()), (1, true));
     assert_eq!(sent[0].parsed().destination, None);
+}
+
+/// 135.1 test 10.2.4.8: a link broadcast for a network reached through
+/// another router on its own arrival link is left to that router, which
+/// heard it too: nothing is sent, not even a reject. Sent to this router
+/// alone, the same NPDU still goes on to that router.
+#[test]
+fn a_link_broadcast_for_a_network_behind_its_arrival_port_is_left_alone() {
+    let mut router = router();
+    let mut host = Recorder::default();
+    learn_9_via_r7(&mut router, at(0));
+    let remote_broadcast = apdu_to(9, &[], UNCONFIRMED);
+
+    let (outcome, sent) =
+        deliver_broadcast(&mut router, &mut host, 1, NODE_A, &remote_broadcast, at(1));
+    assert_eq!(outcome, Outcome::Discarded(Discard::BehindArrivalPort));
+    assert!(sent.is_empty());
+    assert_eq!(router.counters().behind_arrival_port, 1);
+
+    let (_, sent) = deliver(&mut router, &mut host, 1, NODE_A, &remote_broadcast, at(1));
+    assert_eq!((sent[0].port, sent[0].to.as_deref()), (1, Some(R7)));
 }
 
 /// Clause 6.5.4 and 6.2.3: toward another router the DNET and DADR stay,
