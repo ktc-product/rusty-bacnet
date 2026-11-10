@@ -13,7 +13,7 @@ use bacnet_types::enums::ObjectType;
 const ENROLLMENT_EVAL_LENDERS: [ObjectType; 1] = [ObjectType::EVENT_ENROLLMENT];
 
 /// The built-in types that lend reliability evaluation.
-const RELIABILITY_EVAL_LENDERS: [ObjectType; 17] = [
+const RELIABILITY_EVAL_LENDERS: [ObjectType; 18] = [
     ObjectType::ANALOG_INPUT,
     ObjectType::ANALOG_OUTPUT,
     ObjectType::ANALOG_VALUE,
@@ -33,6 +33,8 @@ const RELIABILITY_EVAL_LENDERS: [ObjectType; 17] = [
     ObjectType::ACCUMULATOR,
     // Likewise (#2446).
     ObjectType::INTEGER_VALUE,
+    // Takes the Reliability the application works out for its link.
+    ObjectType::NETWORK_PORT,
 ];
 
 fn assert_in_catalogue(seen: &BTreeSet<u32>, lenders: &[ObjectType]) {

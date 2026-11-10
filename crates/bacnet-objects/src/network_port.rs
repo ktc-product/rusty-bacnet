@@ -71,6 +71,8 @@ pub struct NetworkPortObject {
     /// The B/IP multicast group the owner lends, and a written one waiting.
     multicast: multicast::Multicast,
     binding: alloc::sync::Weak<()>,
+    /// Whether the application runs the port's link itself and keeps it in service.
+    kept_in_service: bool,
 }
 
 impl NetworkPortObject {
@@ -118,6 +120,7 @@ impl NetworkPortObject {
             activation: false,
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
+            kept_in_service: false,
         })
     }
 
@@ -158,6 +161,7 @@ impl NetworkPortObject {
             activation: false,
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
+            kept_in_service: false,
         })
     }
 
@@ -190,7 +194,17 @@ impl NetworkPortObject {
             activation: false,
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
+            kept_in_service: false,
         })
+    }
+
+    /// For a port whose link the application runs itself, without registering it: the port
+    /// stays in service, so a client's Out_Of_Service write is refused, as a bound port's is.
+    /// Out_Of_Service TRUE must stop communication through the port (Clause 12.56), which the
+    /// object can't do for a link it doesn't own.
+    pub fn keep_in_service(&mut self) {
+        self.out_of_service = false;
+        self.kept_in_service = true;
     }
 
     /// Set the optional descriptive label without altering port configuration.
@@ -275,7 +289,9 @@ impl BACnetObject for NetworkPortObject {
         _priority: Option<u8>,
     ) -> Result<(), Error> {
         crate::property_metadata::check_write_array_index(&*self, property, array_index)?;
-        if property == PropertyIdentifier::OUT_OF_SERVICE && self.is_bound() {
+        if property == PropertyIdentifier::OUT_OF_SERVICE
+            && (self.is_bound() || self.kept_in_service)
+        {
             return Err(common::write_access_denied_error());
         }
         if let Some(result) =
@@ -307,6 +323,24 @@ impl BACnetObject for NetworkPortObject {
 
     fn property_metadata(&self) -> Cow<'_, [crate::property_metadata::PropertyMetadata]> {
         metadata::for_object(self)
+    }
+
+    crate::traits::lend_reliability_eval!();
+}
+
+/// The Reliability the application works out for a port it keeps in service, such as a link it
+/// can't open. A port a client can take out of service keeps NO_FAULT_DETECTED: one that can
+/// report a fault must take a client's Reliability while out of service (Clause 12.56).
+impl crate::traits::ReliabilityEval for NetworkPortObject {
+    fn set_reliability(&mut self, reliability: Reliability) -> Result<(), Error> {
+        if !self.kept_in_service {
+            return Err(common::write_access_denied_error());
+        }
+        if !common::is_reliability_value_valid(reliability) {
+            return Err(common::value_out_of_range_error());
+        }
+        self.reliability = reliability;
+        Ok(())
     }
 }
 

@@ -427,6 +427,77 @@ fn configured_mstp_master_reads_its_station_and_token_limits() {
     }
 }
 
+/// Clause 12.56 Reliability and Status_Flags: a fault the application works out for a port it
+/// keeps in service is its Reliability, with FAULT set.
+#[test]
+fn an_application_reliability_is_reported_with_the_fault_flag() {
+    let mut object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
+    object.keep_in_service();
+
+    object
+        .reliability_eval()
+        .unwrap()
+        .set_reliability(Reliability::COMMUNICATION_FAILURE)
+        .unwrap();
+
+    assert_eq!(
+        object.read_property(P::RELIABILITY, None).unwrap(),
+        PropertyValue::Enumerated(12)
+    );
+    let PropertyValue::BitString { data, .. } =
+        object.read_property(P::STATUS_FLAGS, None).unwrap()
+    else {
+        panic!("Status_Flags is a bit string");
+    };
+    // IN_ALARM, FAULT, OVERRIDDEN, OUT_OF_SERVICE from the high bit.
+    assert_eq!(data[0] & 0xF0, 0b0100_0000);
+}
+
+/// Clause 12.56 Reliability: a port a client can take out of service would then have to take
+/// the client's Reliability, so it keeps NO_FAULT_DETECTED and refuses the application's.
+#[test]
+fn an_application_reliability_needs_a_port_kept_in_service() {
+    let mut object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
+
+    let refused = object
+        .reliability_eval()
+        .unwrap()
+        .set_reliability(Reliability::COMMUNICATION_FAILURE);
+
+    error(
+        refused.map(|()| PropertyValue::Null),
+        ErrorCode::WRITE_ACCESS_DENIED,
+    );
+    assert_eq!(
+        object.read_property(P::RELIABILITY, None).unwrap(),
+        PropertyValue::Enumerated(0)
+    );
+}
+
+/// Clause 12.56 Out_Of_Service: TRUE stops communication through the port, which a port whose
+/// link the application runs can't do, so it stays in service and lists the row read-only.
+#[test]
+fn a_port_kept_in_service_refuses_out_of_service() {
+    let mut object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
+    object.keep_in_service();
+
+    let refused =
+        object.write_property(P::OUT_OF_SERVICE, None, PropertyValue::Boolean(true), None);
+
+    error(
+        refused.map(|()| PropertyValue::Null),
+        ErrorCode::WRITE_ACCESS_DENIED,
+    );
+    assert_eq!(
+        object.read_property(P::OUT_OF_SERVICE, None).unwrap(),
+        PropertyValue::Boolean(false)
+    );
+    assert!(!crate::property_metadata::is_writable_property(
+        &object,
+        P::OUT_OF_SERVICE
+    ));
+}
+
 #[test]
 fn configured_mstp_metadata_is_the_common_rows_and_the_masters_two() {
     let object = NetworkPortObject::new_mstp(3, "trunk", mstp_config()).unwrap();
