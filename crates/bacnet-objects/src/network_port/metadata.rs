@@ -192,7 +192,7 @@ const FOREIGN: &[PropertyMetadata] = &[
         ReadOnly,
     ),
 ];
-pub(super) fn for_object(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadata]> {
+fn for_profile(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadata]> {
     if let Some(config) = &object.ip {
         let profile = match config {
             IpConfig::V4(_) => BIP,
@@ -246,4 +246,22 @@ pub(super) fn for_object(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadat
     } else {
         Cow::Borrowed(COMMON)
     }
+}
+
+pub(super) fn for_object(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadata]> {
+    let rows = for_profile(object);
+    if !object.kept_in_service {
+        return rows;
+    }
+    Cow::Owned(
+        rows.iter()
+            .copied()
+            .map(|mut row| {
+                if row.property_identifier == P::OUT_OF_SERVICE {
+                    row.write_capability = ReadOnly;
+                }
+                row
+            })
+            .collect(),
+    )
 }
