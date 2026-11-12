@@ -108,6 +108,13 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+/// Enters the bindings' runtime on this thread until the guard drops, for work
+/// done outside a binding future that registers with its reactor, such as
+/// opening a serial port.
+pub(crate) fn enter_runtime() -> tokio::runtime::EnterGuard<'static> {
+    runtime().enter()
+}
+
 /// Schedule pure Rust best-effort destruction on the shared binding runtime.
 /// The cleanup future must never attach Python or block its dropping thread.
 pub(crate) fn spawn_cleanup(future: impl Future<Output = ()> + Send + 'static) {

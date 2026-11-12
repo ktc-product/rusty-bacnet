@@ -167,6 +167,9 @@ fn open_port(options: &MstpOptions) -> PyResult<TokioSerialPort> {
     )?;
     let echo = options.port_echo()?;
     check_config(&options.config())?;
+    // The stream registers with the reactor of the runtime it opens in, and a
+    // server opens its port before its startup future reaches that runtime.
+    let _runtime = crate::py_async::enter_runtime();
     let serial = TokioSerialPort::open(&SerialConfig {
         port_name: path.to_string(),
         baud_rate: options.baud,
@@ -520,6 +523,23 @@ mod tests {
             let serial = open_port(&options).unwrap();
             assert_eq!(serial.echo(), expected, "{options:?}");
         }
+        close(fds);
+    }
+
+    /// A port opens from a thread outside any runtime, as `BACnetServer.start`
+    /// opens it before its startup future runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_port_opens_outside_a_runtime() {
+        let (fds, path) = pseudo_terminal();
+        let options = MstpOptions {
+            serial_port: Some(path),
+            ..options()
+        };
+
+        let opened = open_port(&options);
+
+        assert!(opened.is_ok(), "{:?}", opened.err());
         close(fds);
     }
 
