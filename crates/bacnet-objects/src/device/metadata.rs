@@ -120,6 +120,14 @@ pub(super) fn for_object(object: &DeviceObject) -> Cow<'_, [PropertyMetadata]> {
             PropertyMetadata::new(P::BACKUP_AND_RESTORE_STATE, Optional, None, ReadOnly),
         ]);
     }
+    if object.properties.contains_key(&P::RESTORE_COMPLETION_TIME) {
+        rows.to_mut().push(PropertyMetadata::new(
+            P::RESTORE_COMPLETION_TIME,
+            Optional,
+            None,
+            ReadOnly,
+        ));
+    }
     if object.audit_recipient_present() {
         rows.to_mut().push(PropertyMetadata::new(
             P::AUDIT_NOTIFICATION_RECIPIENT,

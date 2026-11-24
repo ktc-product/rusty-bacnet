@@ -208,6 +208,10 @@ pub struct DeviceConfig {
     pub backup_and_restore: bool,
     /// Initial Backup_Failure_Timeout in seconds. Only served with `backup_and_restore`.
     pub backup_failure_timeout: u16,
+    /// Restore_Completion_Time in seconds: how long a client waits after END_RESTORE before
+    /// using the device again. Only served with `backup_and_restore`; without it a client
+    /// waits for nothing.
+    pub restore_completion_time: Option<u16>,
 }
 
 impl Default for DeviceConfig {
@@ -222,6 +226,7 @@ impl Default for DeviceConfig {
             apdu_retries: 3,
             backup_and_restore: false,
             backup_failure_timeout: 60,
+            restore_completion_time: None,
         }
     }
 }
@@ -372,6 +377,12 @@ impl DeviceObject {
                 PropertyIdentifier::BACKUP_FAILURE_TIMEOUT,
                 PropertyValue::Unsigned(u64::from(config.backup_failure_timeout)),
             );
+            if let Some(seconds) = config.restore_completion_time {
+                properties.insert(
+                    PropertyIdentifier::RESTORE_COMPLETION_TIME,
+                    PropertyValue::Unsigned(u64::from(seconds)),
+                );
+            }
             properties.insert(
                 PropertyIdentifier::BACKUP_AND_RESTORE_STATE,
                 PropertyValue::Enumerated(BackupAndRestoreState::IDLE.to_raw()),

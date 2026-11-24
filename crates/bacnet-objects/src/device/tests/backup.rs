@@ -227,3 +227,33 @@ fn backup_failure_timeout_refuses_what_is_not_a_timeout() {
         ErrorCode::PROPERTY_IS_NOT_AN_ARRAY,
     );
 }
+
+#[test]
+fn restore_completion_time_is_served_only_when_set() {
+    let property = PropertyIdentifier::RESTORE_COMPLETION_TIME;
+
+    let without = backup_device();
+    assert!(!crate::property_metadata::has_property(
+        &without.property_metadata(),
+        property
+    ));
+    assert_property_error(
+        without.read_property(property, None),
+        ErrorCode::UNKNOWN_PROPERTY,
+    );
+
+    let with = DeviceObject::new(DeviceConfig {
+        backup_and_restore: true,
+        restore_completion_time: Some(2),
+        ..DeviceConfig::default()
+    })
+    .unwrap();
+    assert!(crate::property_metadata::has_property(
+        &with.property_metadata(),
+        property
+    ));
+    assert_eq!(
+        with.read_property(property, None).unwrap(),
+        PropertyValue::Unsigned(2)
+    );
+}
