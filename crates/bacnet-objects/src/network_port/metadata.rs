@@ -250,15 +250,19 @@ fn for_profile(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadata]> {
 
 pub(super) fn for_object(object: &NetworkPortObject) -> Cow<'_, [PropertyMetadata]> {
     let rows = for_profile(object);
-    if !object.kept_in_service {
+    if !object.kept_in_service && !object.network_number_writable {
         return rows;
     }
     Cow::Owned(
         rows.iter()
             .copied()
             .map(|mut row| {
-                if row.property_identifier == P::OUT_OF_SERVICE {
+                if object.kept_in_service && row.property_identifier == P::OUT_OF_SERVICE {
                     row.write_capability = ReadOnly;
+                }
+                if object.network_number_writable && row.property_identifier == P::NETWORK_NUMBER
+                {
+                    row.write_capability = Always;
                 }
                 row
             })

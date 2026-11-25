@@ -31,6 +31,8 @@ use bacnet_types::enums::PropertyIdentifier as P;
 use bacnet_types::error::Error;
 use bacnet_types::primitives::PropertyValue;
 
+use bacnet_types::network_number::NetworkNumber;
+
 use super::NetworkPortObject;
 use super::bip_mode::{LiveMode, bdt_value, host_n_port_value};
 use crate::common;
@@ -43,11 +45,22 @@ pub(super) struct Pending {
     bbmd: BbmdChanges,
     /// A foreign device's rows.
     foreign: ForeignDeviceChanges,
+    network_number: Option<u16>,
 }
 
 impl Pending {
     fn is_empty(&self) -> bool {
+        self.mode_is_empty() && self.network_number.is_none()
+    }
+
+    fn mode_is_empty(&self) -> bool {
         self.bbmd.is_empty() && self.foreign.is_empty()
+    }
+
+    /// Drops the mode's values, keeping a written Network_Number.
+    pub(super) fn clear_mode(&mut self) {
+        self.bbmd = BbmdChanges::default();
+        self.foreign = ForeignDeviceChanges::default();
     }
 }
 
@@ -77,6 +90,9 @@ impl NetworkPortObject {
                 .foreign
                 .subscription_lifetime
                 .map(|ttl| Ok(PropertyValue::Unsigned(ttl.into()))),
+            P::NETWORK_NUMBER => pending
+                .network_number
+                .map(|number| Ok(PropertyValue::Unsigned(number.into()))),
             _ => None,
         }
     }
@@ -89,6 +105,11 @@ impl NetworkPortObject {
         array_index: Option<u32>,
         value: &PropertyValue,
     ) -> Option<Result<(), Error>> {
+        if property == P::NETWORK_NUMBER {
+            return self
+                .network_number_writable
+                .then(|| self.write_network_number(array_index, value));
+        }
         let row = match &self.mode {
             LiveMode::Bbmd(_) => {
                 matches!(
@@ -167,11 +188,40 @@ impl NetworkPortObject {
         })
     }
 
+    /// Takes a written Network_Number, 1 to 65534.
+    fn write_network_number(
+        &mut self,
+        array_index: Option<u32>,
+        value: &PropertyValue,
+    ) -> Result<(), Error> {
+        if array_index.is_some() {
+            return Err(common::property_is_not_an_array_error());
+        }
+        match value {
+            PropertyValue::Unsigned(number @ 1..=65534) => {
+                self.pending.network_number = Some(*number as u16);
+                Ok(())
+            }
+            PropertyValue::Unsigned(_) => Err(common::value_out_of_range_error()),
+            _ => Err(common::invalid_data_type_error()),
+        }
+    }
+
+    /// The Network_Number written to the port and waiting for activation.
+    pub fn pending_network_number(&self) -> Option<u16> {
+        self.pending.network_number
+    }
+
+    /// The Network_Number in effect, a pending write aside.
+    pub fn network_number_in_effect(&self) -> u16 {
+        self.network_number.snapshot().0
+    }
+
     /// Whether the pending values would still be taken, changing nothing:
     /// the check a ReinitializeDevice makes before its handler runs.
     pub fn check_pending_changes(&self) -> Result<(), Error> {
         self.check_multicast()?;
-        if self.pending.is_empty() {
+        if self.pending.mode_is_empty() {
             return Ok(());
         }
         match &self.mode {
@@ -224,13 +274,17 @@ impl NetworkPortObject {
         // BDT row and its group go together (Annex J.8.3), and goes in with
         // them in one activation (#1963).
         debug_assert!(
-            self.pending.is_empty() || !self.multicast.is_pending(),
+            self.pending.mode_is_empty() || !self.multicast.is_pending(),
             "mode values and a multicast group pending together"
         );
-        if !self.pending.is_empty() {
+        if !self.pending.mode_is_empty() {
             self.activate_mode_changes()?;
         }
         self.activate_multicast()?;
+        if let Some(number) = self.pending.network_number.take() {
+            self.network_number =
+                NetworkNumber::configured(number).expect("validated Network Number");
+        }
         Ok(true)
     }
 
@@ -242,7 +296,7 @@ impl NetworkPortObject {
             // A port whose mode changed dropped its pending values then.
             LiveMode::Normal => return Err(common::write_access_denied_error()),
         }
-        self.pending = Pending::default();
+        self.pending.clear_mode();
         Ok(())
     }
 }

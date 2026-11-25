@@ -96,7 +96,7 @@ impl NetworkPortObject {
         self.mac_address = config.mac();
         self.ip = Some(config);
         self.mode = mode;
-        self.pending = Default::default();
+        self.pending.clear_mode();
         self.multicast.clear_pending();
         Ok(())
     }

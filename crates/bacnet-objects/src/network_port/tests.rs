@@ -387,7 +387,7 @@ fn non_bip_application_rows_do_not_claim_ipv4_fields() {
     );
 }
 
-fn mstp_config() -> MstpPortConfig {
+pub(super) fn mstp_config() -> MstpPortConfig {
     MstpPortConfig {
         network_number: 2650,
         apdu_length: 480,

@@ -276,14 +276,43 @@ impl ObjectDatabase {
 
     /// Check, changing nothing, that every built-in Network Port's pending
     /// values would still be taken: what a ReinitializeDevice ACTIVATE_CHANGES
-    /// or WARMSTART checks before its handler runs.
+    /// or WARMSTART checks before its handler runs. No two ports may end up
+    /// on one network number.
     pub fn check_network_port_changes(&mut self) -> Result<(), Error> {
+        let mut after_activation = Vec::new();
         for oid in self.network_port_oids() {
             if let Some(port) = self.builtin_network_port_mut(&oid) {
                 port.check_pending_changes()?;
+                let number = port
+                    .pending_network_number()
+                    .unwrap_or_else(|| port.network_number_in_effect());
+                // 0 is a port with no network number yet, which several may be.
+                if number != 0 {
+                    after_activation.push(number);
+                }
             }
         }
+
+        after_activation.sort_unstable();
+        if after_activation.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("two Network Ports would have one Network_Number"));
+        }
         Ok(())
+    }
+
+    /// The Network_Number in effect on each built-in Network Port, pending
+    /// writes aside, in identifier order.
+    pub fn network_numbers_in_effect(&mut self) -> Vec<(ObjectIdentifier, u16)> {
+        let mut numbers: Vec<_> = self
+            .network_port_oids()
+            .into_iter()
+            .filter_map(|oid| {
+                let port = self.builtin_network_port_mut(&oid)?;
+                Some((oid, port.network_number_in_effect()))
+            })
+            .collect();
+        numbers.sort_unstable();
+        numbers
     }
 
     /// Put the values written to every built-in Network Port into effect and

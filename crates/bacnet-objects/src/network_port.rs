@@ -73,6 +73,8 @@ pub struct NetworkPortObject {
     binding: alloc::sync::Weak<()>,
     /// Whether the application runs the port's link itself and keeps it in service.
     kept_in_service: bool,
+    /// Whether clients may write Network_Number, for the application to put into effect.
+    network_number_writable: bool,
 }
 
 impl NetworkPortObject {
@@ -121,6 +123,7 @@ impl NetworkPortObject {
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
             kept_in_service: false,
+            network_number_writable: false,
         })
     }
 
@@ -162,6 +165,7 @@ impl NetworkPortObject {
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
             kept_in_service: false,
+            network_number_writable: false,
         })
     }
 
@@ -195,6 +199,7 @@ impl NetworkPortObject {
             multicast: Default::default(),
             binding: alloc::sync::Weak::new(),
             kept_in_service: false,
+            network_number_writable: false,
         })
     }
 
@@ -205,6 +210,11 @@ impl NetworkPortObject {
     pub fn keep_in_service(&mut self) {
         self.out_of_service = false;
         self.kept_in_service = true;
+    }
+
+    /// Lets clients write Network_Number, pending until ACTIVATE_CHANGES or WARMSTART.
+    pub fn allow_network_number_writes(&mut self) {
+        self.network_number_writable = true;
     }
 
     /// Set the optional descriptive label without altering port configuration.
@@ -236,7 +246,9 @@ impl BACnetObject for NetworkPortObject {
             P::NETWORK_TYPE => Ok(PropertyValue::Enumerated(self.network_type.to_raw())),
             P::PROTOCOL_LEVEL => Ok(PropertyValue::Enumerated(2)),
             P::NETWORK_NUMBER => Ok(PropertyValue::Unsigned(
-                self.network_number.snapshot().0.into(),
+                self.pending_network_number()
+                    .unwrap_or_else(|| self.network_number_in_effect())
+                    .into(),
             )),
             P::NETWORK_NUMBER_QUALITY => Ok(PropertyValue::Enumerated(
                 self.network_number.snapshot().1.into(),
@@ -354,6 +366,8 @@ mod mode_tests;
 mod multicast_tests;
 #[cfg(test)]
 mod nat_pending_tests;
+#[cfg(test)]
+mod network_number_tests;
 #[cfg(test)]
 mod pending_tests;
 #[cfg(test)]
